@@ -2,12 +2,13 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
+from datetime import datetime
 
 # ----------------------------------------
 # 1. PAGE SETUP
 # ----------------------------------------
-st.set_page_config(page_title="Advanced Purchasing Command Center", layout="wide", initial_sidebar_state="expanded")
-st.title("📊 Advanced Purchasing Command Center")
+st.set_page_config(page_title="CPJ Purchasing Dashboard", layout="wide", initial_sidebar_state="expanded")
+st.title("📊 CPJ Purchasing Dashboard")
 st.markdown("Comprehensive oversight for F&B procurement, GIT expediting, and capital allocation.")
 
 # ----------------------------------------
@@ -16,7 +17,7 @@ st.markdown("Comprehensive oversight for F&B procurement, GIT expediting, and ca
 @st.cache_data
 def load_data():
     # --- A. Sales / Item Master ---
-    sales = pd.read_csv("Purchase Report Sales Analysis with Raw Depletions (15).csv")
+    sales = pd.read_csv("Purchase Report Sales Analysis with Raw Depletions (15)_2.csv")
     sales.rename(columns={'\ufeffItem Number': 'Item Number'}, inplace=True)
     sales['Item Number'] = sales['Item Number'].astype(str).str.replace(r'\.0$', '', regex=True)
     
@@ -36,7 +37,11 @@ def load_data():
     sales['6M_Avg_Depletion_Cases'] = sales['6M_Avg_Depletion_Base'] / sales['Conversion Factor']
 
     # --- B. PO Dates (GIT) ---
-    po = pd.read_excel("PO DATES.xlsx", sheet_name="GIT Report")
+    po = pd.read_excel("PO Date.xlsx", sheet_name="GIT Report")
+    
+    # 1. Exclude P01 from Otp column
+    po = po[po['Otp'] != 'P01']
+    
     po['Item number'] = po['Item number'].astype(str).str.replace(r'\.0$', '', regex=True)
     
     # Enrich PO with Sales Master Data
@@ -45,26 +50,40 @@ def load_data():
     po['Conversion Factor'] = po['Conversion Factor'].fillna(1)
     po['Buyer'] = po['Buyer'].fillna('Unassigned')
     
-    # Clean PO Numbers & Dates
+    # 2. Use USD $ for Value Calculations
+    po['USD $'] = pd.to_numeric(po['USD $'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     po['Order qty'] = pd.to_numeric(po['Order qty'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     po['Order Qty (Cases)'] = po['Order qty'] / po['Conversion Factor']
-    po['Line amount'] = pd.to_numeric(po['Line amount'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     
-    date_cols = ['Ord dt', 'Req dt', 'Rec dt', 'ETD', 'ETA', 'Arrival', 'Clearance Paid']
-    for col in date_cols:
-        po[col] = pd.to_datetime(po[col], errors='coerce')
+    # 3. Clean Corrupted Date Formats (e.g. converting float 20250912.0 to actual date)
+    def parse_mixed_dates(series):
+        if pd.api.types.is_datetime64_any_dtype(series):
+            return series
+        s_clean = series.astype(str).str.split('.').str[0]
+        s_clean = s_clean.replace({'nan': None, 'NaT': None, 'None': None, '': None})
+        return pd.to_datetime(s_clean, format='%Y%m%d', errors='coerce')
+
+    po['Ord dt'] = pd.to_datetime(po['Ord dt'], errors='coerce')
+    po['Req dt'] = pd.to_datetime(po['Req dt'], errors='coerce')
+    po['Arrival'] = parse_mixed_dates(po['Arrival'])
+    po['ETA'] = parse_mixed_dates(po['ETA'])
         
     po['Actual Lead Time (Days)'] = (po['Arrival'] - po['Ord dt']).dt.days
-    po['Order Month'] = po['Ord dt'].dt.to_period('M').astype(str)
-    po['ETA Month'] = po['ETA'].dt.to_period('M').astype(str)
+    po.loc[po['Actual Lead Time (Days)'] < 0, 'Actual Lead Time (Days)'] = np.nan # Clears out errors
     
-    # Expediting Risk: Is the ETA past the Requested Date?
-    po['ETA Variance (Days)'] = (po['ETA'] - po['Req dt']).dt.days
-    po['Delivery Status'] = np.where(po['ETA Variance (Days)'] > 0, 'Late', 'On Time / Early')
+    po['Order Month'] = po['Ord dt'].dt.to_period('M').astype(str)
+    
+    # 4. GIT Expediting Flags based on Today's Date
+    today = pd.Timestamp.today().normalize()
+    po['Delivery Status'] = 'On Time / Tracking'
+    
+    # Flag logic: Overdue ETA takes priority, followed by Past Requested Date
+    po.loc[po['Req dt'] < today, 'Delivery Status'] = 'Late (Past Req Date)'
+    po.loc[po['ETA'] < today, 'Delivery Status'] = 'Late (Past ETA)'
 
     # --- C. Forecast ---
-    fc_q4 = pd.read_excel("CPJ FORECAST - SEP 2026-MAR 2027.xlsx", sheet_name="Sept - Dec FCST 2026", header=3)
-    fc_q1 = pd.read_excel("CPJ FORECAST - SEP 2026-MAR 2027.xlsx", sheet_name="Jan-Mar 2027 FCST", header=3)
+    fc_q4 = pd.read_excel("CPJ FORECAST - SEP 2026-MAR 2027_2.xlsx", sheet_name="Sept - Dec FCST 2026", header=3)
+    fc_q1 = pd.read_excel("CPJ FORECAST - SEP 2026-MAR 2027_2.xlsx", sheet_name="Jan-Mar 2027 FCST", header=3)
     
     fc_q4['Item Code'] = fc_q4['Item Code'].astype(str).str.replace(r'\.0$', '', regex=True)
     fc_q1['Item Code'] = fc_q1['Item Code'].astype(str).str.replace(r'\.0$', '', regex=True)
@@ -73,7 +92,6 @@ def load_data():
     fc = fc.merge(sales[['Item Number', 'Conversion Factor', 'Supplier Name']], left_on='Item Code', right_on='Item Number', how='left')
     fc['Conversion Factor'] = fc['Conversion Factor'].fillna(1)
     
-    # Safely handle Item Description column naming conflicts during merge
     if 'Item Description_x' in fc.columns:
         fc.rename(columns={'Item Description_x': 'Item Description'}, inplace=True)
     
@@ -120,13 +138,12 @@ tabs = st.tabs([
 with tabs[0]:
     st.header("Executive Summary: Spend & Buyer Analytics")
     
-    # Top KPI Metrics
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Open PO Spend", f"${po_filtered['Line amount'].sum():,.0f}")
+    col1.metric("Total Open PO Spend", f"${po_filtered['USD $'].sum():,.0f}")
     col2.metric("Total PO Volume (CS)", f"{po_filtered['Order Qty (Cases)'].sum():,.0f}")
     col3.metric("Current Inventory Value", f"${sales_filtered['Inventory Value'].sum():,.0f}")
     
-    late_orders = po_filtered[po_filtered['Delivery Status'] == 'Late']['PO no'].nunique()
+    late_orders = po_filtered[po_filtered['Delivery Status'].str.contains('Late', na=False)]['PO no'].nunique()
     col4.metric("POs Flagged Late", f"{late_orders}", delta_color="inverse")
     
     st.divider()
@@ -134,32 +151,36 @@ with tabs[0]:
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
         st.subheader("PO Spend by Month")
-        po_month = po_filtered[po_filtered['Order Month'] != 'NaT'].groupby('Order Month')['Line amount'].sum().reset_index().sort_values('Order Month')
-        fig_month = px.bar(po_month, x='Order Month', y='Line amount', title='Purchasing Value Output (USD) by Order Creation Month', text_auto='.2s')
+        po_month = po_filtered[po_filtered['Order Month'] != 'NaT'].groupby('Order Month')['USD $'].sum().reset_index().sort_values('Order Month')
+        fig_month = px.bar(po_month, x='Order Month', y='USD $', title='Purchasing Value Output (USD) by Order Date', text_auto='.2s')
         st.plotly_chart(fig_month, use_container_width=True)
         
     with row1_col2:
         st.subheader("Spend by Buyer")
-        buyer_summ = po_filtered.groupby('Buyer')['Line amount'].sum().reset_index().sort_values('Line amount', ascending=False)
-        fig_buyer = px.pie(buyer_summ, values='Line amount', names='Buyer', hole=0.4, title='Total Commitments by Buyer')
+        buyer_summ = po_filtered.groupby('Buyer')['USD $'].sum().reset_index()
+        # 5. Exclude buyers with < 5% of total spend
+        total_spend = buyer_summ['USD $'].sum()
+        buyer_summ['Spend %'] = buyer_summ['USD $'] / total_spend
+        buyer_summ = buyer_summ[buyer_summ['Spend %'] >= 0.05].sort_values('USD $', ascending=False)
+        
+        fig_buyer = px.pie(buyer_summ, values='USD $', names='Buyer', hole=0.4, title='Total Commitments (Excluding <5% Shares)')
         st.plotly_chart(fig_buyer, use_container_width=True)
 
 # -- TAB 2: GIT & EXPEDITING --
 with tabs[1]:
     st.header("Goods In Transit & Expediting Action Board")
-    st.markdown("**Focus:** Open containers where the current ETA is later than the initially Requested Date.")
+    st.markdown("**Focus:** Open containers flagged as Late because their Request Date or ETA is older than today.")
     
-    # Filter for items that have not arrived/stripped
     open_git = po_filtered[~po_filtered['Status'].str.contains('Stripped|Yard', na=False)]
-    late_git = open_git[open_git['Delivery Status'] == 'Late'].sort_values('ETA Variance (Days)', ascending=False)
+    late_git = open_git[open_git['Delivery Status'].str.contains('Late', na=False)]
     
     col1, col2 = st.columns([1, 2])
     with col1:
-        fig_late = px.histogram(open_git, x='Delivery Status', color='Delivery Status', title="Open Orders: On Time vs Late")
+        fig_late = px.histogram(open_git, x='Delivery Status', color='Delivery Status', title="Open Orders: Tracking vs Late")
         st.plotly_chart(fig_late, use_container_width=True)
     with col2:
-        st.subheader("Critical Expedite List (Late ETA)")
-        st.dataframe(late_git[['PO no', 'Buyer', 'Supplier', 'ItemDescription', 'Req dt', 'ETA', 'ETA Variance (Days)', 'Status']].style.background_gradient(subset=['ETA Variance (Days)'], cmap='Reds'))
+        st.subheader("Critical Expedite List")
+        st.dataframe(late_git[['PO no', 'Buyer', 'Supplier', 'ItemDescription', 'Req dt', 'ETA', 'Delivery Status', 'Status']])
 
 # -- TAB 3: INVENTORY HEALTH --
 with tabs[2]:
@@ -168,14 +189,12 @@ with tabs[2]:
     row3_col1, row3_col2 = st.columns(2)
     with row3_col1:
         st.subheader("💀 Dead Stock Warning")
-        st.markdown("High inventory value, but **0 cases depleted** on average over the last 6 months.")
         dead_stock = sales_filtered[(sales_filtered['Inventory Value'] > 500) & (sales_filtered['6M_Avg_Depletion_Cases'] == 0)]
         dead_stock = dead_stock.sort_values('Inventory Value', ascending=False)
-        st.dataframe(dead_stock[['Item Number', 'Item Description', 'Inventory Value', 'Last Price', 'Category']].head(15))
+        st.dataframe(dead_stock[['Item Number', 'Item Description', 'Inventory Value', 'Last Price']].head(15))
         
     with row3_col2:
         st.subheader("🚨 Critical Stockouts")
-        st.markdown("Zero inventory value, but historically high turnover (Avg depletion > 10 cases/mo).")
         stockouts = sales_filtered[(sales_filtered['Inventory Value'] == 0) & (sales_filtered['6M_Avg_Depletion_Cases'] > 10)]
         stockouts = stockouts.sort_values('6M_Avg_Depletion_Cases', ascending=False)
         st.dataframe(stockouts[['Item Number', 'Item Description', '6M_Avg_Depletion_Cases', 'Last Purchase Date']].head(15))
@@ -185,7 +204,6 @@ with tabs[3]:
     st.header("7-Month Demand Forecasting")
     case_cols = [c for c in fc_filtered.columns if '(Cases)' in c]
     
-    # Fixed melt using 'Item Description'
     fc_melt = fc_filtered.melt(id_vars=['Item Code', 'Item Description'], value_vars=case_cols, var_name='Month', value_name='Forecasted Cases')
     fc_melt['Month'] = fc_melt['Month'].str.replace('Sum of ', '').str.replace(' (Cases)', '')
     
@@ -200,9 +218,9 @@ with tabs[4]:
     
     scorecard = po_filtered.groupby('Supplier').agg(
         Total_Orders=('PO no', 'count'),
-        Total_Spend=('Line amount', 'sum'),
+        Total_Spend=('USD $', 'sum'),
         Avg_Lead_Time_Days=('Actual Lead Time (Days)', 'mean'),
-        Late_Deliveries=('Delivery Status', lambda x: (x == 'Late').sum())
+        Late_Deliveries=('Delivery Status', lambda x: (x.str.contains('Late')).sum())
     ).reset_index()
     
     scorecard['% Late'] = (scorecard['Late_Deliveries'] / scorecard['Total_Orders']) * 100
@@ -217,10 +235,11 @@ with tabs[4]:
 # -- TAB 6: CASH FLOW --
 with tabs[5]:
     st.header("Cash Flow Commitments by Arrival")
-    st.markdown("Upcoming liabilities grouped by expected vessel arrival month.")
     
-    cf_df = po_filtered[po_filtered['ETA Month'] != 'NaT'].dropna(subset=['ETA', 'Line amount'])
-    cf_summ = cf_df.groupby('ETA Month')['Line amount'].sum().reset_index().sort_values('ETA Month')
+    cf_df = po_filtered.dropna(subset=['ETA', 'USD $'])
+    cf_df['ETA Month'] = cf_df['ETA'].dt.to_period('M').astype(str)
     
-    fig_cf = px.bar(cf_summ, x='ETA Month', y='Line amount', title='Capital Required Based on Expected Arrival (USD)', text_auto='.2s')
+    cf_summ = cf_df.groupby('ETA Month')['USD $'].sum().reset_index().sort_values('ETA Month')
+    
+    fig_cf = px.bar(cf_summ, x='ETA Month', y='USD $', title='Capital Required Based on Expected Arrival (USD)', text_auto='.2s')
     st.plotly_chart(fig_cf, use_container_width=True)
