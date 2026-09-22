@@ -38,7 +38,7 @@ def load_data():
     try:
         sales = pd.read_csv("Purchase Report Sales Analysis with Raw Depletions.csv")
         sales.dropna(subset=['Item Description'], inplace=True)
-        sales.rename(columns={'\ufeffItem Number': 'Item Number'}, inplace=True)
+        sales.rename(columns={'﻿Item Number': 'Item Number'}, inplace=True)
         sales['Item Number'] = sales['Item Number'].astype(str).str.replace(r'\.0$', '', regex=True)
     except Exception as e:
         st.error(f"Error loading Sales Analysis CSV: {e}")
@@ -106,7 +106,7 @@ def load_data():
         po['Req dt'] = pd.to_datetime(po['Req dt'], errors='coerce')
         po['Arrival'] = parse_mixed_dates(po['Arrival'])
         po['ETA'] = parse_mixed_dates(po['ETA'])
-        po['Recd dt'] = parse_mixed_dates(po['Recd dt'])
+        po['Recd dt'] = parse_mixed_dates(po['Rec dt'])  # Uses exact column name 'Rec dt' from spreadsheet
         po['Stripped Date'] = parse_mixed_dates(po['Stripped'])
         po['Yard Date'] = parse_mixed_dates(po['Yard'])
             
