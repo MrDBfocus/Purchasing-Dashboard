@@ -222,7 +222,6 @@ with tabs[0]:
         else:
             st.info("Zero spend recorded for selected filters.")
 
-
 # -- TAB 2: GIT & EXPEDITING --
 with tabs[1]:
     st.header("Goods In Transit: Clearance Tracking & Exceptions")
@@ -257,7 +256,6 @@ with tabs[1]:
         arr_df = po_filtered.dropna(subset=['Arrival Variance (Days)'])
         fig_arr = px.histogram(arr_df, x='Arrival Variance (Days)', nbins=40, title="Distribution of Delivery Timing (Negative = Early, Positive = Late Days)")
         st.plotly_chart(fig_arr, use_container_width=True)
-
 
 # -- TAB 3: INVENTORY HEALTH --
 with tabs[2]:
@@ -308,7 +306,6 @@ with tabs[2]:
         fig_safety.update_layout(title="Actual Stock Levels (Sample Items)", xaxis_tickangle=-45)
         st.plotly_chart(fig_safety, use_container_width=True)
 
-
 # -- TAB 4: BID PERFORMANCE --
 with tabs[3]:
     st.header("🏆 Bid Customer Fulfillment & Coverage")
@@ -342,7 +339,6 @@ with tabs[3]:
     else:
         st.info("Bid data not loaded.")
 
-
 # -- TAB 5: FORECAST --
 with tabs[4]:
     st.header("6-Month Forecast Pipeline")
@@ -371,7 +367,6 @@ with tabs[4]:
         else:
             st.info("No forecast items meeting the criteria.")
 
-
 # -- TAB 6: SUPPLIER SCORECARD --
 with tabs[5]:
     st.header("Supplier Scorecard: Reliability & Fill Rates")
@@ -390,7 +385,6 @@ with tabs[5]:
         fig_fill = px.bar(fill_summ, x='Fill Deviation %', y='Supplier', orientation='h', title="Top 10 Inconsistent Vendors by Avg % Deviation", text_auto=',.0f')
         st.plotly_chart(fig_fill, use_container_width=True)
 
-
 # -- TAB 7: CASH FLOW --
 with tabs[6]:
     st.header("Cash Flow Commitments by Arrival")
@@ -403,7 +397,6 @@ with tabs[6]:
         st.plotly_chart(fig_cf, use_container_width=True)
     else:
         st.info("No active PO cash flow data available.")
-
 
 # -- TAB 8: PRICE INDEX (PPV) --
 with tabs[7]:
