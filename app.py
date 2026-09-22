@@ -39,7 +39,7 @@ def load_data():
     sales.rename(columns={'\ufeffItem Number': 'Item Number'}, inplace=True)
     sales['Item Number'] = sales['Item Number'].astype(str).str.replace(r'\.0$', '', regex=True)
     
-    # Calculate Base Inventory minus restricted locations (Plants, Stores, OM)
+    # Calculate Base Inventory minus restricted locations
     for col in ['Inventory Value', 'Allocated quantity', 'On Order', 'Plants', 'Stores', 'OM']:
         if col in sales.columns:
             sales[col] = pd.to_numeric(sales[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -49,7 +49,7 @@ def load_data():
     sales['Conversion Factor'] = pd.to_numeric(sales['Conversion Factor'].astype(str).str.replace(',', ''), errors='coerce').fillna(1).replace(0, 1)
     sales['Last Price'] = pd.to_numeric(sales['Last Price'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     
-    # 3-Month Historical Depletion Average (July-Sept 2026)
+    # 3-Month Historical Depletion Average
     recent_depletions = ['July 2026 Depletion', 'August 2026 Depletion', 'September 2026 Depletion']
     for col in recent_depletions:
          if col in sales.columns:
@@ -66,25 +66,20 @@ def load_data():
     po = po[(po['Otp'] != 'P01') & (po['Hst'] != 99)]
     po['Item number'] = po['Item number'].astype(str).str.replace(r'\.0$', '', regex=True)
     
-    # Apply Custom Category Map
     po['Custom Category'] = po['Item grp'].map(cat_map).fillna('UNCLASSIFIED')
     
-    # Enrich PO
     po = po.merge(sales[['Item Number', 'Conversion Factor']], left_on='Item number', right_on='Item Number', how='left')
     po['Conversion Factor'] = po['Conversion Factor'].fillna(1)
     po['Buyer'] = po['Buyer'].fillna('Unassigned')
     
-    # Value Calcs
     for col in ['USD $', 'Order qty', 'Recd qty', 'Purch price']:
         po[col] = pd.to_numeric(po[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     
     po['Order Qty (Cases)'] = po['Order qty'] / po['Conversion Factor']
     po['Recd Qty (Cases)'] = po['Recd qty'] / po['Conversion Factor']
     
-    # Extract Numeric Status codes
     po['Status Code'] = po['Status'].astype(str).str.extract(r'(\d+)').astype(float)
     
-    # Safe Date Parsing
     def parse_mixed_dates(series):
         if pd.api.types.is_datetime64_any_dtype(series): return series
         s_clean = series.astype(str).str.split('.').str[0].replace({'nan': None, 'NaT': None, 'None': None, '': None})
@@ -101,32 +96,27 @@ def load_data():
     po['Order Year'] = po['Ord dt'].dt.year.fillna(0).astype(int)
     po['Arrival Variance (Days)'] = (po['Arrival'] - po['Req dt']).dt.days
     
-    # Late Flag Logic (Override: Not late if Recd qty > 0)
     today = pd.Timestamp.today().normalize()
     po['Delivery Status'] = 'Tracking'
     po.loc[(po['Req dt'] < today) & (po['Recd qty'] == 0), 'Delivery Status'] = 'Late (Past Req Date)'
     po.loc[(po['ETA'] < today) & (po['Recd qty'] == 0), 'Delivery Status'] = 'Late (Past ETA)'
 
-    # --- C. Forecast ---
-    fc_q4 = pd.read_excel("CPJ FORECAST.xlsx", sheet_name="Sept - Dec FCST 2026", header=3)
-    fc_q1 = pd.read_excel("CPJ FORECAST.xlsx", sheet_name="Jan-Mar 2027 FCST", header=3)
+    # --- C. Forecast (Updated for unified sheet structure) ---
+    fc = pd.read_excel("CPJ FORECAST.xlsx", sheet_name="Sept - Mar FCST")
+    fc['Item Code'] = fc['Item Code'].astype(str).str.replace(r'\.0$', '', regex=True)
     
-    fc_q4['Item Code'] = fc_q4['Item Code'].astype(str).str.replace(r'\.0$', '', regex=True)
-    fc_q1['Item Code'] = fc_q1['Item Code'].astype(str).str.replace(r'\.0$', '', regex=True)
-    fc = pd.merge(fc_q4, fc_q1[['Item Code', 'Sum of Jan-27 vol', 'Sum of Feb-27 vol', 'Sum of Mar-27 vol']], on='Item Code', how='outer')
-    
-    fc = fc.merge(sales[['Item Number', 'Conversion Factor']], left_on='Item Code', right_on='Item Number', how='left')
+    fc = fc.merge(sales[['Item Number', 'Conversion Factor', 'Supplier Name']], left_on='Item Code', right_on='Item Number', how='left')
     fc['Conversion Factor'] = fc['Conversion Factor'].fillna(1)
-    if 'Item Description_x' in fc.columns: fc.rename(columns={'Item Description_x': 'Item Description'}, inplace=True)
     
-    forecast_cols = ['Sum of September Vol', 'Sum of October Vol', 'Sum of November Vol', 'Sum of December Vol', 'Sum of Jan-27 vol', 'Sum of Feb-27 vol', 'Sum of Mar-27 vol']
+    # The columns in the new sheet format
+    forecast_cols = ['September', 'October', 'November', 'December', 'January', 'February', 'March']
     for col in forecast_cols:
         if col in fc.columns:
             fc[col] = pd.to_numeric(fc[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             fc[col + ' (Cases)'] = fc[col] / fc['Conversion Factor']
             
     # Calculate 3M Forecast Average (Oct-Dec)
-    fc['3M_Avg_Forecast_Cases'] = fc[['Sum of October Vol (Cases)', 'Sum of November Vol (Cases)', 'Sum of December Vol (Cases)']].mean(axis=1)
+    fc['3M_Avg_Forecast_Cases'] = fc[['October (Cases)', 'November (Cases)', 'December (Cases)']].mean(axis=1)
 
     # --- D. Bids ---
     bids = pd.read_excel("BIDS.xlsx")
@@ -157,7 +147,6 @@ def filter_data(po, sales, fc):
 
 po_filtered, sales_filtered, fc_filtered = filter_data(po_df, sales_df, fc_df)
 
-# Active PO Definition (Status 20 to 40)
 po_active = po_filtered[(po_filtered['Status Code'] >= 20) & (po_filtered['Status Code'] <= 40)]
 
 # ----------------------------------------
@@ -241,7 +230,6 @@ with tabs[1]:
 with tabs[2]:
     st.header("Inventory Health: Dead Stock & Slow Moving")
     
-    # Link Sales to Forecast to calculate Slow Moving
     inv_eval = sales_filtered.merge(fc_filtered[['Item Code', '3M_Avg_Forecast_Cases']], left_on='Item Number', right_on='Item Code', how='left')
     inv_eval['3M_Avg_Forecast_Cases'] = inv_eval['3M_Avg_Forecast_Cases'].fillna(0)
     
@@ -255,7 +243,6 @@ with tabs[2]:
     with row3_col2:
         st.subheader("🐢 Slow Moving Stock")
         st.markdown("Stocked items where 3-month sales are **>30% lower** than 3-month forecast.")
-        # Only evaluate items that had a forecast > 0 and actually have stock
         slow = inv_eval[(inv_eval['Warehouse Inventory Value'] > 0) & (inv_eval['3M_Avg_Forecast_Cases'] > 0)].copy()
         slow['Sales vs Forecast'] = slow['3M_Avg_Depletion_Cases'] / slow['3M_Avg_Forecast_Cases']
         slow_moving = slow[slow['Sales vs Forecast'] < 0.70]
@@ -268,7 +255,6 @@ with tabs[3]:
     
     bids_merged = bids_df.merge(sales_filtered[['Item Number', 'Current_Stock_Cases', 'Category']], left_on='Item ', right_on='Item Number', how='left')
     
-    # Calculate PO Inventory (At Port vs On Order)
     port_statuses = ['3-At the Port', '4-In the Yard']
     po_port = po_active[po_active['Status'].isin(port_statuses)].groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases At Port')
     po_order = po_active[~po_active['Status'].isin(port_statuses)].groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases On Order')
@@ -305,18 +291,19 @@ with tabs[4]:
         fc_display = fc_display[fc_display['Item Code'].str.contains(search_term, case=False, na=False) | 
                                 fc_display['Item Description'].str.contains(search_term, case=False, na=False)]
     
-    case_cols = [c for c in fc_display.columns if '(Cases)' in c]
+    forecast_cols = ['September', 'October', 'November', 'December', 'January', 'February', 'March']
+    case_cols = [c + ' (Cases)' for c in forecast_cols]
+    
     fc_melt = fc_display.melt(id_vars=['Item Code', 'Item Description'], value_vars=case_cols, var_name='Month', value_name='Forecasted Cases')
-    fc_melt['Month'] = fc_melt['Month'].str.replace('Sum of ', '').str.replace(' (Cases)', '')
+    fc_melt['Month'] = fc_melt['Month'].str.replace(' (Cases)', '')
     
-    fc_trend = fc_melt.groupby('Month')['Forecasted Cases'].sum().reindex(['September Vol', 'October Vol', 'November Vol', 'December Vol', 'Jan-27 vol', 'Feb-27 vol']).reset_index()
+    fc_trend = fc_melt.groupby('Month')['Forecasted Cases'].sum().reindex(forecast_cols).reset_index()
     
-    # Only chart items with >10 avg cases
     high_vol = fc_display[fc_display['3M_Avg_Forecast_Cases'] > 10]
     high_vol_melt = high_vol.melt(id_vars=['Item Code', 'Item Description'], value_vars=case_cols[:6], var_name='Month', value_name='Forecasted Cases')
-    high_vol_melt['Month'] = high_vol_melt['Month'].str.replace('Sum of ', '').str.replace(' (Cases)', '')
+    high_vol_melt['Month'] = high_vol_melt['Month'].str.replace(' (Cases)', '')
     
-    fig_fc = px.line(high_vol_melt.groupby('Month')['Forecasted Cases'].sum().reindex(['September Vol', 'October Vol', 'November Vol', 'December Vol', 'Jan-27 vol', 'Feb-27 vol']).reset_index(), 
+    fig_fc = px.line(high_vol_melt.groupby('Month')['Forecasted Cases'].sum().reindex(forecast_cols[:6]).reset_index(), 
                      x='Month', y='Forecasted Cases', markers=True, title='6-Month Pipeline (Only >10 Avg Cases)')
     st.plotly_chart(fig_fc, use_container_width=True)
     st.dataframe(fc_display[['Item Code', 'Item Description', '3M_Avg_Forecast_Cases'] + case_cols[:6]])
@@ -326,7 +313,6 @@ with tabs[4]:
 with tabs[5]:
     st.header("Supplier Scorecard: Reliability & Fill Rates")
     
-    # Fill Rate Calc: (Recd / Ordered) - 1
     po_recd = po_filtered[(po_filtered['Order qty'] > 0) & (po_filtered['Recd qty'] > 0)].copy()
     po_recd['Fill Deviation %'] = ((po_recd['Recd qty'] / po_recd['Order qty']) - 1) * 100
     
