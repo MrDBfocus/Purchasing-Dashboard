@@ -130,11 +130,21 @@ sales_df, po_df, fc_df, bids_df = load_data()
 # 3. GLOBAL SLICERS (SIDEBAR)
 # ----------------------------------------
 st.sidebar.header("Global Filters")
-valid_years = po_df[po_df['Order Year'] >= 2025]['Order Year'].unique().tolist()
-slicer_year = st.sidebar.multiselect("Order Year", sorted(valid_years))
-slicer_month = st.sidebar.multiselect("Order Month", sorted(po_df['Order Month'].unique()))
-slicer_supplier = st.sidebar.multiselect("Supplier", options=sorted(po_df['Supplier'].dropna().unique()))
-slicer_category = st.sidebar.multiselect("Custom Category", options=sorted(po_df['Custom Category'].unique()))
+
+# Cleanly extract and sort valid years
+valid_years = po_df[po_df['Order Year'] >= 2025]['Order Year'].dropna().unique().tolist()
+slicer_year = st.sidebar.multiselect("Order Year", sorted([int(y) for y in valid_years]))
+
+# Cleanly extract and sort valid months
+clean_months = [m for m in po_df['Order Month'].astype(str).unique() if m not in ['NaT', 'nan', 'None']]
+slicer_month = st.sidebar.multiselect("Order Month", sorted(clean_months))
+
+# Cleanly extract other categories
+clean_suppliers = [s for s in po_df['Supplier'].astype(str).unique() if s not in ['nan', 'None']]
+slicer_supplier = st.sidebar.multiselect("Supplier", options=sorted(clean_suppliers))
+
+clean_categories = [c for c in po_df['Custom Category'].astype(str).unique() if c not in ['nan', 'None']]
+slicer_category = st.sidebar.multiselect("Custom Category", options=sorted(clean_categories))
 
 def filter_data(po, sales, fc):
     if slicer_year: po = po[po['Order Year'].isin(slicer_year)]
@@ -148,7 +158,6 @@ def filter_data(po, sales, fc):
 po_filtered, sales_filtered, fc_filtered = filter_data(po_df, sales_df, fc_df)
 
 po_active = po_filtered[(po_filtered['Status Code'] >= 20) & (po_filtered['Status Code'] <= 40)]
-
 # ----------------------------------------
 # 4. DASHBOARD TABS
 # ----------------------------------------
