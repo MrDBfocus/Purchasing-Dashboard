@@ -46,7 +46,6 @@ def load_data():
 
     try:
         po = pd.read_excel("PO Dates.xlsx", sheet_name="GIT Report")
-        # Hard exclusions: Otp != P01, Hst != 99
         po = po[(po['Otp'] != 'P01') & (po['Hst'] != 99)]
         po['Item number'] = po['Item number'].astype(str).str.replace(r'\.0$', '', regex=True)
         po['Custom Category'] = po['Item grp'].map(cat_map).fillna('UNCLASSIFIED')
@@ -71,25 +70,31 @@ def load_data():
     if not sales.empty:
         for col in ['Inventory Value', 'Allocated quantity', 'On Order', 'Plants', 'Stores', 'OM', 'Conversion Factor', 'Last Price']:
             if col in sales.columns:
-                sales[col] = pd.to_numeric(sales[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                sales[col] = pd.to_numeric(sales[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(float)
         sales['Warehouse Inventory Value'] = (sales['Inventory Value'] - sales['Plants'] - sales['Stores'] - sales['OM']).clip(lower=0)
         sales['Conversion Factor'] = sales['Conversion Factor'].replace(0, 1)
         
         recent_depletions = [c for c in sales.columns if 'Depletion' in c][-3:]
-        sales['3M_Avg_Depletion'] = sales[recent_depletions].mean(axis=1) if recent_depletions else 0
+        if recent_depletions:
+            for col in recent_depletions:
+                sales[col] = pd.to_numeric(sales[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(float)
+            sales['3M_Avg_Depletion'] = sales[recent_depletions].to_numpy().mean(axis=1)
+        else:
+            sales['3M_Avg_Depletion'] = 0.0
+            
         sales['Current_Stock_Cases'] = sales['Warehouse Inventory Value'] / sales['Conversion Factor']
 
     if not po.empty and not sales.empty:
-        po = po.merge(sales[['Item Number', 'ConversionFactor']], left_on='Item number', right_on='Item Number', how='left')
-        po['ConversionFactor'] = po['ConversionFactor'].fillna(1)
+        po = po.merge(sales[['Item Number', 'Conversion Factor']], left_on='Item number', right_on='Item Number', how='left')
+        po['Conversion Factor'] = po['Conversion Factor'].fillna(1)
         po['Buyer'] = po['Buyer'].fillna('Unassigned')
         
         for col in ['USD $', 'Order qty', 'Recd qty', 'Purch price']:
             if col in po.columns:
-                po[col] = pd.to_numeric(po[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                po[col] = pd.to_numeric(po[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(float)
         
-        po['Order Qty (Cases)'] = po['Order qty'] / po['ConversionFactor']
-        po['Recd Qty (Cases)'] = po['Recd qty'] / po['ConversionFactor']
+        po['Order Qty (Cases)'] = po['Order qty'] / po['Conversion Factor']
+        po['Recd Qty (Cases)'] = po['Recd qty'] / po['Conversion Factor']
         po['Status Code'] = po['Status'].astype(str).str.extract(r'(\d+)').astype(float).fillna(0)
         
         def parse_mixed_dates(series):
@@ -111,7 +116,6 @@ def load_data():
         
         today = pd.Timestamp.today().normalize()
         po['Delivery Status'] = 'Tracking'
-        # Exclude from late if Recd dt present or Status Code > 49
         late_mask = (po['Recd dt'].isna()) & (po['Status Code'] <= 49)
         po.loc[(po['Req dt'] < today) & late_mask, 'Delivery Status'] = 'Late (Past Req Date)'
         po.loc[(po['ETA'] < today) & late_mask, 'Delivery Status'] = 'Late (Past ETA)'
@@ -119,11 +123,11 @@ def load_data():
     if not fc.empty:
         fc_num_cols = [c for c in fc.columns if c not in ['Brand', 'S Item Group', 'S Item Class', 'Item Code', 'Item Description']]
         for col in fc_num_cols:
-            fc[col] = pd.to_numeric(fc[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            fc[col] = pd.to_numeric(fc[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(float)
         if len(fc_num_cols) >= 3:
-            fc['3M_Avg_Forecast_Cases'] = fc[fc_num_cols[:3]].mean(axis=1)
+            fc['3M_Avg_Forecast_Cases'] = fc[fc_num_cols[:3]].to_numpy().mean(axis=1)
         else:
-            fc['3M_Avg_Forecast_Cases'] = 0
+            fc['3M_Avg_Forecast_Cases'] = 0.0
 
     return sales, po, fc, bids
 
@@ -155,8 +159,6 @@ def filter_data(po, sales, fc):
     return po, sales, fc
 
 po_filtered, sales_filtered, fc_filtered = filter_data(po_df, sales_df, fc_df)
-
-# Active PO Definition (Status 20 to 40)
 po_active = po_filtered[(po_filtered['Status Code'] >= 20) & (po_filtered['Status Code'] <= 40)] if not po_filtered.empty else pd.DataFrame()
 
 # ----------------------------------------
@@ -247,7 +249,6 @@ with tabs[1]:
     if not po_filtered.empty:
         target_statuses = ['1-Not Departed', '2-On the Water', '3-At the Port', '4-In the Yard']
         git_open = po_filtered[po_filtered['Status'].isin(target_statuses)]
-        # Exclude if Recd dt present or Status Code > 49
         pending_git = git_open[(git_open['Recd dt'].isna()) & (git_open['Status Code'] <= 49)]
         st.dataframe(pending_git[['Container Numb', 'PO no', 'Status', 'Supplier', 'Req dt', 'ETA', 'Delivery Status']].drop_duplicates())
 
@@ -274,7 +275,6 @@ with tabs[2]:
         inv_eval = sales_filtered.merge(fc_filtered, left_on='Item Number', right_on='Item Code', how='left')
         inv_eval['3M_Avg_Forecast_Cases'] = inv_eval['3M_Avg_Forecast_Cases'].fillna(0)
         
-        # Filter out excluded categories for Dead & Slow stock graphs
         inv_eval_filtered = inv_eval[~inv_eval['Item Class'].isin(EXCLUDED_CATS)]
         
         row3_col1, row3_col2 = st.columns(2)
@@ -283,7 +283,7 @@ with tabs[2]:
             dead_stock = inv_eval_filtered[(inv_eval_filtered['Warehouse Inventory Value'] > 100) & (inv_eval_filtered['3M_Avg_Depletion'] == 0)]
             if not dead_stock.empty:
                 dead_cat = dead_stock.groupby('Item Class')['Warehouse Inventory Value'].sum().reset_index()
-                fig_dead = px.bar(dead_cat, x='Item Class', y='Warehouse Inventory Value', title="Dead Stock Value by Category (Excl. Plant/Operations)", text_auto=',.0f')
+                fig_dead = px.bar(dead_cat, x='Item Class', y='Warehouse Inventory Value', title="Dead Stock Value by Category", text_auto=',.0f')
                 st.plotly_chart(fig_dead, use_container_width=True)
             else:
                 st.info("No dead stock identified.")
@@ -302,7 +302,7 @@ with tabs[2]:
 
     st.subheader("Safety Stock vs. Current Stock Levels")
     if not sales_filtered.empty:
-        safety_df = sales_filtered.head(30) # Top 30 items for visual clarity
+        safety_df = sales_filtered.head(30)
         fig_safety = go.Figure()
         fig_safety.add_trace(go.Bar(x=safety_df['Item Description'], y=safety_df['Current_Stock_Cases'], name='Current Stock (Cases)', marker_color='teal'))
         fig_safety.update_layout(title="Actual Stock Levels (Sample Items)", xaxis_tickangle=-45)
@@ -357,7 +357,6 @@ with tabs[4]:
         
         forecast_cols = [c for c in fc_display.columns if c not in ['Brand', 'S Item Group', 'S Item Class', 'Item Code', 'Item Description', 'Supplier Name', '3M_Avg_Forecast_Cases']]
         
-        # Filter items with >10 avg cases and sort highest to lowest
         high_vol = fc_display[fc_display['3M_Avg_Forecast_Cases'] >= 10].sort_values(by='3M_Avg_Forecast_Cases', ascending=False)
         
         if not high_vol.empty and forecast_cols:
