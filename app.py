@@ -17,7 +17,8 @@ st.markdown("Comprehensive oversight for F&B procurement, GIT expediting, and ca
 @st.cache_data
 def load_data():
     # --- A. Sales / Item Master ---
-    sales = pd.read_csv("Purchase Report Sales Analysis with Raw Depletions (15)_2.csv")
+    # UPDATED FILE NAME:
+    sales = pd.read_csv("Purchase Report Sales Analysis with Raw Depletions.csv")
     sales.rename(columns={'\ufeffItem Number': 'Item Number'}, inplace=True)
     sales['Item Number'] = sales['Item Number'].astype(str).str.replace(r'\.0$', '', regex=True)
     
@@ -37,7 +38,8 @@ def load_data():
     sales['6M_Avg_Depletion_Cases'] = sales['6M_Avg_Depletion_Base'] / sales['Conversion Factor']
 
     # --- B. PO Dates (GIT) ---
-    po = pd.read_excel("PO Date.xlsx", sheet_name="GIT Report")
+    # UPDATED FILE NAME:
+    po = pd.read_excel("PO Dates.xlsx", sheet_name="GIT Report")
     
     # 1. Exclude P01 from Otp column
     po = po[po['Otp'] != 'P01']
@@ -82,8 +84,9 @@ def load_data():
     po.loc[po['ETA'] < today, 'Delivery Status'] = 'Late (Past ETA)'
 
     # --- C. Forecast ---
-    fc_q4 = pd.read_excel("CPJ FORECAST - SEP 2026-MAR 2027_2.xlsx", sheet_name="Sept - Dec FCST 2026", header=3)
-    fc_q1 = pd.read_excel("CPJ FORECAST - SEP 2026-MAR 2027_2.xlsx", sheet_name="Jan-Mar 2027 FCST", header=3)
+    # UPDATED FILE NAME:
+    fc_q4 = pd.read_excel("CPJ FORECAST.xlsx", sheet_name="Sept - Dec FCST 2026", header=3)
+    fc_q1 = pd.read_excel("CPJ FORECAST.xlsx", sheet_name="Jan-Mar 2027 FCST", header=3)
     
     fc_q4['Item Code'] = fc_q4['Item Code'].astype(str).str.replace(r'\.0$', '', regex=True)
     fc_q1['Item Code'] = fc_q1['Item Code'].astype(str).str.replace(r'\.0$', '', regex=True)
@@ -182,7 +185,7 @@ with tabs[1]:
         st.subheader("Critical Expedite List")
         st.dataframe(late_git[['PO no', 'Buyer', 'Supplier', 'ItemDescription', 'Req dt', 'ETA', 'Delivery Status', 'Status']])
 
-# -- TAB 3: INVENTORY HEALTH --
+# -- TAB 3: INVENTORY Health --
 with tabs[2]:
     st.header("Inventory Health: Dead Stock & Stockout Risks")
     
