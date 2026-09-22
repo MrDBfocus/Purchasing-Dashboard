@@ -101,21 +101,19 @@ def load_data():
     po.loc[(po['Req dt'] < today) & (po['Recd qty'] == 0), 'Delivery Status'] = 'Late (Past Req Date)'
     po.loc[(po['ETA'] < today) & (po['Recd qty'] == 0), 'Delivery Status'] = 'Late (Past ETA)'
 
-    # --- C. Forecast (Updated for unified sheet structure) ---
+    # --- C. Forecast ---
     fc = pd.read_excel("CPJ FORECAST.xlsx", sheet_name="Sept - Mar FCST")
     fc['Item Code'] = fc['Item Code'].astype(str).str.replace(r'\.0$', '', regex=True)
     
     fc = fc.merge(sales[['Item Number', 'Conversion Factor', 'Supplier Name']], left_on='Item Code', right_on='Item Number', how='left')
     fc['Conversion Factor'] = fc['Conversion Factor'].fillna(1)
     
-    # The columns in the new sheet format
     forecast_cols = ['September', 'October', 'November', 'December', 'January', 'February', 'March']
     for col in forecast_cols:
         if col in fc.columns:
             fc[col] = pd.to_numeric(fc[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             fc[col + ' (Cases)'] = fc[col] / fc['Conversion Factor']
             
-    # Calculate 3M Forecast Average (Oct-Dec)
     fc['3M_Avg_Forecast_Cases'] = fc[['October (Cases)', 'November (Cases)', 'December (Cases)']].mean(axis=1)
 
     # --- D. Bids ---
@@ -131,19 +129,16 @@ sales_df, po_df, fc_df, bids_df = load_data()
 # ----------------------------------------
 st.sidebar.header("Global Filters")
 
-# Cleanly extract and sort valid years
-valid_years = po_df[po_df['Order Year'] >= 2025]['Order Year'].dropna().unique().tolist()
-slicer_year = st.sidebar.multiselect("Order Year", sorted([int(y) for y in valid_years]))
+valid_years = [int(y) for y in po_df[po_df['Order Year'] >= 2025]['Order Year'].dropna().unique().tolist()]
+slicer_year = st.sidebar.multiselect("Order Year", sorted(valid_years))
 
-# Cleanly extract and sort valid months
-clean_months = [m for m in po_df['Order Month'].astype(str).unique() if m not in ['NaT', 'nan', 'None']]
+clean_months = [str(m) for m in po_df['Order Month'].dropna().unique() if str(m) not in ['NaT', 'nan', 'None']]
 slicer_month = st.sidebar.multiselect("Order Month", sorted(clean_months))
 
-# Cleanly extract other categories
-clean_suppliers = [s for s in po_df['Supplier'].astype(str).unique() if s not in ['nan', 'None']]
+clean_suppliers = [str(s) for s in po_df['Supplier'].dropna().unique() if str(s) not in ['nan', 'None']]
 slicer_supplier = st.sidebar.multiselect("Supplier", options=sorted(clean_suppliers))
 
-clean_categories = [c for c in po_df['Custom Category'].astype(str).unique() if c not in ['nan', 'None']]
+clean_categories = [str(c) for c in po_df['Custom Category'].dropna().unique() if str(c) not in ['nan', 'None']]
 slicer_category = st.sidebar.multiselect("Custom Category", options=sorted(clean_categories))
 
 def filter_data(po, sales, fc):
@@ -156,8 +151,8 @@ def filter_data(po, sales, fc):
     return po, sales, fc
 
 po_filtered, sales_filtered, fc_filtered = filter_data(po_df, sales_df, fc_df)
-
 po_active = po_filtered[(po_filtered['Status Code'] >= 20) & (po_filtered['Status Code'] <= 40)]
+
 # ----------------------------------------
 # 4. DASHBOARD TABS
 # ----------------------------------------
