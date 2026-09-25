@@ -3,99 +3,23 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
-import glob
-import os
 from datetime import datetime
 
-# ==========================================================================
-# CPJ PURCHASING DASHBOARD — REVISED
-#
-# WHAT WAS BROKEN AND WHY (see chat write-up for full detail):
-#   1. ROOT CAUSE of almost every blank report: the "open 20-40 / closed
-#      50-85 / deleted 99" status codes described in the revision notes
-#      live in the PO Dates "Hst" column, NOT the "Status" text column
-#      ("1-Not Departed", "6-Stripped", etc.). The old code extracted a
-#      digit from "Status" (which only ever yields 1-6) and then filtered
-#      for values between 20 and 85 — that can never match, so the PO
-#      table was filtered down to ZERO rows on every load. Every tab that
-#      depends on PO data (Executive Spend, GIT, Cash Flow, Price Index,
-#      Supplier Scorecard, Bid Performance's on-order figures) was blank
-#      because of this one line.
-#   2. Bid Performance was fully broken: the code looked for columns
-#      'Item ', 'Description', 'Customer' that don't exist in BIDS.xlsx.
-#      The real columns are 'CPJ Code', 'CPJ Item Description',
-#      'Customer Name', 'CPJ Class', 'Bid Status', etc. This raised a
-#      KeyError that was silently swallowed, leaving bids as an empty
-#      DataFrame.
-#   3. The Sales/Purchase-Analysis category mapping referenced a column
-#      ('Item Group') that doesn't exist in that file — the equivalent
-#      field is 'Item Class'. The old code's fallback silently overwrote
-#      the real 'Category' column with the literal string "UNCLASSIFIED"
-#      for every row.
-#   4. "In the Yard" containers are coded '5-Yard' in the data, not
-#      '4-In the Yard' — the GIT status list didn't match, so Yard
-#      containers were dropped from the pending/expediting report.
-#   5. Filenames: the files you uploaded use underscores
-#      (PO_Dates.xlsx, CPJ_FORECAST.xlsx, Purchase_Report_Sales_...csv);
-#      the code looked for the space-separated versions. Added a small
-#      file-finder so the app works with either naming convention.
-#   6. A few reports were requested in the revision notes but never
-#      actually built (Reorder Exception Summary, Safety Stock vs
-#      Current Stock, Forecast-change safety-stock alerts, Inventory
-#      Turnover ratios, PO Spend by Month 2025-present) — these are now
-#      implemented.
-#
-# DATA-QUALITY NOTES (flagged, not hidden):
-#   - One item ("SAMPLE MEAT", #9000912) carries a $4.6M inventory value
-#     with a conversion factor of 1, which massively distorts the MEATS
-#     category. Rows whose description contains "SAMPLE" are excluded
-#     from the inventory analysis (they are clearly placeholder/test
-#     items, not real stock). Flag this file for your team to check.
-#   - There is no explicit "Safety Stock" or "Reorder Point" field in any
-#     source file. Safety Stock here is *computed* as
-#     (Lead Time in days / 30) x 3-Month-Avg-Depletion — a standard
-#     lead-time coverage formula — using each item's 'Lead time' field
-#     (defaults to 30 days where missing). Adjust the multiplier/formula
-#     in SAFETY_STOCK section below if your team uses a different rule.
-#   - "Committed" volume for the bid stock-vs-committed chart uses each
-#     item's 3-Month-Avg-Depletion (in cases) as a practical proxy,
-#     because BIDS.xlsx's 'Avg Monthly Usage' is in the *customer's* UOM
-#     (e.g. KG) and the 'Customer to CPJ UOM' conversion column is empty
-#     in this file, so it can't be reliably converted to cases.
-#   - Rounding: per your instruction all values are shown with 0
-#     decimals, EXCEPT "Months of Stock / Months Cover" figures, which
-#     are kept to 1 decimal — rounding e.g. 0.2 and 0.4 months both to
-#     "0" would erase exactly the urgency signal those reports exist to
-#     show. Say the word and I'll force those to whole numbers too.
-# ==========================================================================
-
-st.set_page_config(page_title="CPJ Purchasing Dashboard", layout="wide", initial_sidebar_state="expanded")
+# ----------------------------------------
+# 1. PAGE SETUP
+# ----------------------------------------
+st.set_page_config(
+    page_title="CPJ Purchasing Dashboard", 
+    layout="wide", 
+    initial_sidebar_state="expanded"
+)
 st.title("📊 CPJ Purchasing Dashboard")
 st.markdown("Comprehensive oversight for F&B procurement, GIT expediting, and capital allocation.")
-
-DATA_DIR = "."  # change to wherever the source files live in your deployment
-
-# ----------------------------------------
-# FILE RESOLUTION (works with either naming convention)
-# ----------------------------------------
-def find_file(candidates):
-    """Return the first existing path among candidates; fall back to a
-    fuzzy glob match on the first keyword of each candidate name."""
-    for c in candidates:
-        p = os.path.join(DATA_DIR, c)
-        if os.path.exists(p):
-            return p
-    for c in candidates:
-        key = c.split('.')[0].split(' ')[0].split('_')[0]
-        matches = glob.glob(os.path.join(DATA_DIR, f"*{key}*"))
-        if matches:
-            return matches[0]
-    return None
 
 # ----------------------------------------
 # CATEGORY MAPPING DICTIONARY
 # ----------------------------------------
-cat_map = {
+CAT_MAP = {
     'GR_SNACK': 'DRY GROCERY', 'OP_PROCM': 'OPERATIONS', 'CN_F&B': 'OPERATIONS', 'GR_COND': 'DRY GROCERY',
     'FF_MEAT': 'MEATS', 'BV_NONAL': 'BEVERAGE', 'GR_PASTA': 'DRY GROCERY', 'GR_BAKIN': 'DRY GROCERY',
     'FF_DAIRY': 'DAIRY', 'GR_FRUIT': 'DRY GROCERY', 'NF_F&B': 'NON-FOODS', 'OP_MAINT': 'OPERATIONS',
@@ -103,245 +27,267 @@ cat_map = {
     'RM_JP': 'JUICE PLANT', 'OP_ITQ': 'OPERATIONS', 'GR_MEAT&': 'DRY GROCERY', 'NF_HOUSE': 'NON-FOOD',
     'OP_OVERH': 'OPERATIONS', 'OP_SALES': 'OPERATIONS', 'PO_BEV': 'OPERATIONS', 'BV_BEER': 'BEVERAGE',
     'FF_SEAFO': 'SEAFOOD', 'OP_PROCJ': 'OPERATIONS', 'BV_WINE': 'BEVERAGE', 'OP_MPASS': 'OPERATIONS',
-    'NF_OTHER': 'NON-FOOD', 'BS_JUICE': 'BEVERAGE SYSTEM', 'BS_SOFTS': 'BEVERAGE SYSTEM',
-    'BS_SLUSH': 'BEVERAGE SYSTEM', 'PO_CORP': 'OPERATIONS', 'PO_FOOD&': 'OPERATIONS',
+    'NF_OTHER': 'NON-FOOD', 'BS_JUICE': 'BEVERAGE SYSTEM', 'BS_SOFTS': 'BEVERAGE SYSTEM', 
+    'BS_SLUSH': 'BEVERAGE SYSTEM', 'PO_CORP': 'OPERATIONS', 'PO_FOOD&': 'OPERATIONS', 
     'OP_PASS': 'OPERATIONS', 'OP_CHARG': 'OPERATIONS'
 }
+
 EXCLUDED_CATS = ['OPERATIONS', 'BEVERAGE SYSTEM', 'JUICE PLANT', 'MEAT PLANT']
 
-# Containers actually "in transit" per the data (note: the yard code is
-# '5-Yard', not '4-In the Yard' as originally assumed)
-TRANSIT_STATUSES = ['1-Not Departed', '2-On the Water', '3-At the Port', '5-Yard']
-PORT_STATUSES = ['3-At the Port', '5-Yard']
+# ----------------------------------------
+# HELPER DATA CLEANING FUNCTIONS
+# ----------------------------------------
+def clean_item_code(series):
+    """Standardize item codes across all source files."""
+    if series is None:
+        return pd.Series(dtype=str)
+    return (
+        series.astype(str)
+        .str.strip()
+        .str.replace(r'\.0$', '', regex=True)
+        .str.upper()
+    )
 
 def parse_mixed_dates(series):
+    """Robustly parse mixed date formats (YYYYMMDD, ISO strings, Excel serials)."""
+    if series is None or series.empty:
+        return pd.Series(dtype='datetime64[ns]')
+    
+    # Handle direct datetime
     if pd.api.types.is_datetime64_any_dtype(series):
         return series
-    s_clean = series.astype(str).str.split('.').str[0].replace({'nan': None, 'NaT': None, 'None': None, '': None})
-    return pd.to_datetime(s_clean, format='%Y%m%d', errors='coerce')
-
-def clean_id(series):
-    return series.astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    
+    # Clean string format
+    s_clean = series.astype(str).str.split('.').str[0].str.strip()
+    s_clean = s_clean.replace({'nan': None, 'NaT': None, 'None': None, '': None, '0': None})
+    
+    # Attempt parsing YYYYMMDD format
+    parsed_dt = pd.to_datetime(s_clean, format='%Y%m%d', errors='coerce')
+    
+    # Fallback to standard flexible date parser for non-matching rows
+    mask_null = parsed_dt.isna() & s_clean.notna()
+    if mask_null.any():
+        parsed_dt.loc[mask_null] = pd.to_datetime(s_clean[mask_null], errors='coerce')
+        
+    return parsed_dt
 
 # ----------------------------------------
 # 2. DATA LOADING & ENGINEERING
 # ----------------------------------------
 @st.cache_data
 def load_data():
-    # ---------------- SALES / PURCHASE ANALYSIS ----------------
-    sales = pd.DataFrame()
-    sales_path = find_file([
-        "Purchase Report Sales Analysis with Raw Depletions.csv",
-        "Purchase_Report_Sales_Analysis_with_Raw_Depletions.csv",
-    ])
+    # --- 1. Load Sales Analysis ---
     try:
-        sales = pd.read_csv(sales_path)
-        sales.columns = [c.replace('\ufeff', '') for c in sales.columns]  # strip BOM
-
-        # Remove the trailing subtotal row (blank Item Description) and the
-        # leading placeholder row that some exports include (Item Number '-')
+        sales = pd.read_csv("Purchase Report Sales Analysis with Raw Depletions.csv", encoding="utf-8-sig")
+        sales.columns = sales.columns.str.strip().str.replace('\ufeff', '')
+        
+        # Standardize Item Number
+        item_col = [c for c in sales.columns if 'item' in c.lower() and 'group' not in c.lower() and 'class' not in c.lower()]
+        item_col = item_col[0] if item_col else 'Item Number'
+        sales.rename(columns={item_col: 'Item Number'}, inplace=True)
+        
+        # Filter totals & NaNs
         sales = sales[~sales['Item Description'].astype(str).str.contains('Total', case=False, na=False)]
         sales.dropna(subset=['Item Description'], inplace=True)
-        sales = sales[sales['Item Number'].astype(str) != '-']
-        # Placeholder/test items (see data-quality note at top of file)
-        sales = sales[~sales['Item Description'].astype(str).str.contains('SAMPLE', case=False, na=False)]
-
-        sales['Item Number'] = clean_id(sales['Item Number'])
-
-        # FIX: the category code lives in 'Item Class', not 'Item Group'
-        # (which doesn't exist in this file). Written to a NEW column so
-        # the file's own 'Category' field is preserved untouched.
-        if 'Item Class' in sales.columns:
-            sales['Custom Category'] = sales['Item Class'].map(cat_map).fillna('UNCLASSIFIED')
+        sales['Item Number'] = clean_item_code(sales['Item Number'])
+        
+        # Map Category
+        grp_col = [c for c in sales.columns if 'group' in c.lower()]
+        if grp_col:
+            sales['Category'] = sales[grp_col[0]].astype(str).str.strip().map(CAT_MAP).fillna('UNCLASSIFIED')
         else:
-            sales['Custom Category'] = 'UNCLASSIFIED'
+            sales['Category'] = 'UNCLASSIFIED'
+            
+    except Exception as e:
+        st.error(f"Error loading Sales Analysis CSV: {e}")
+        sales = pd.DataFrame()
 
-        for col in ['Inventory Value', 'Allocated quantity', 'On Order', 'Plants', 'Stores', 'OM',
-                    'Conversion Factor', 'Last Price', 'Lead time']:
+    # --- 2. Load PO Dates ---
+    try:
+        po = pd.read_excel("PO Dates.xlsx", sheet_name="GIT Report")
+        po.columns = po.columns.str.strip()
+        
+        # Identify key columns dynamically
+        po_item_col = [c for c in po.columns if 'item' in c.lower() and 'grp' not in c.lower()][0]
+        po.rename(columns={po_item_col: 'Item number'}, inplace=True)
+        po['Item number'] = clean_item_code(po['Item number'])
+        
+        # Clean Status & Filter active codes (20-85), exclude deleted (HST=99)
+        status_col = [c for c in po.columns if 'status' in c.lower() and 'code' not in c.lower()][0]
+        po['Status Code'] = po[status_col].astype(str).str.extract(r'(\d+)').astype(float).fillna(0).astype(int)
+        
+        hst_col = [c for c in po.columns if 'hst' in c.lower()]
+        if hst_col:
+            po = po[po[hst_col[0]].astype(str).str.strip() != '99']
+            
+        po = po[(po['Status Code'] >= 20) & (po['Status Code'] <= 85)]
+        
+        grp_col_po = [c for c in po.columns if 'grp' in c.lower()]
+        if grp_col_po:
+            po['Custom Category'] = po[grp_col_po[0]].astype(str).str.strip().map(CAT_MAP).fillna('UNCLASSIFIED')
+        else:
+            po['Custom Category'] = 'UNCLASSIFIED'
+            
+    except Exception as e:
+        st.error(f"Error loading PO Dates Excel: {e}")
+        po = pd.DataFrame()
+
+    # --- 3. Load Forecast ---
+    try:
+        fc = pd.read_excel("CPJ FORECAST.xlsx", sheet_name="Sept - Mar FCST")
+        fc.columns = fc.columns.str.strip()
+        fc_item_col = [c for c in fc.columns if 'code' in c.lower() or 'item' in c.lower()][0]
+        fc.rename(columns={fc_item_col: 'Item Code'}, inplace=True)
+        fc['Item Code'] = clean_item_code(fc['Item Code'])
+    except Exception as e:
+        st.error(f"Error loading CPJ Forecast Excel: {e}")
+        fc = pd.DataFrame()
+
+    # --- 4. Load Bids ---
+    try:
+        bids = pd.read_excel("BIDS.xlsx")
+        bids.columns = bids.columns.str.strip()
+        bid_item_col = [c for c in bids.columns if 'item' in c.lower()][0]
+        bids.rename(columns={bid_item_col: 'Item Number'}, inplace=True)
+        bids['Item Number'] = clean_item_code(bids['Item Number'])
+    except Exception as e:
+        st.error(f"Error loading BIDS Excel: {e}")
+        bids = pd.DataFrame()
+
+    # ---------------- Data Engineering ----------------
+    if not sales.empty:
+        num_cols_sales = ['Inventory Value', 'Allocated quantity', 'On Order', 'Plants', 'Stores', 'OM', 'Conversion Factor', 'Last Price']
+        for col in num_cols_sales:
             if col in sales.columns:
-                sales[col] = pd.to_numeric(sales[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(float)
+                sales[col] = pd.to_numeric(sales[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            else:
+                sales[col] = 1.0 if col == 'Conversion Factor' else 0.0
 
+        # Safe Warehouse Inventory Calculation
         sales['Warehouse Inventory Value'] = (sales['Inventory Value'] - sales['Plants'] - sales['Stores'] - sales['OM']).clip(lower=0)
-        sales['Conversion Factor'] = sales['Conversion Factor'].replace(0, 1)
-
+        sales['Conversion Factor'] = sales['Conversion Factor'].replace(0, 1.0).fillna(1.0)
+        
+        # Calculate Depletions & Stock Cases (Integer Output)
         recent_depletions = [c for c in sales.columns if 'Depletion' in c][-3:]
         if recent_depletions:
             for col in recent_depletions:
-                sales[col] = pd.to_numeric(sales[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(float)
-            sales['3M_Avg_Depletion'] = sales[recent_depletions].to_numpy().mean(axis=1).round(0).astype(int)
-            # Clipped-at-zero version for use as a "demand rate" in safety
-            # stock / turnover math, where a handful of negative (return/
-            # adjustment) depletion values would otherwise produce
-            # nonsensical negative thresholds and ratios. Raw figure above
-            # is kept untouched for anything just being displayed as-is.
-            sales['3M_Avg_Depletion_Demand'] = sales['3M_Avg_Depletion'].clip(lower=0)
+                sales[col] = pd.to_numeric(sales[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            sales['3M_Avg_Depletion'] = sales[recent_depletions].mean(axis=1).round(0).astype(int)
         else:
             sales['3M_Avg_Depletion'] = 0
-            sales['3M_Avg_Depletion_Demand'] = 0
 
         sales['Current_Stock_Cases'] = (sales['Warehouse Inventory Value'] / sales['Conversion Factor']).round(0).astype(int)
-        sales['Lead time'] = sales['Lead time'].replace(0, np.nan).fillna(30)  # 30-day default where missing
-    except Exception as e:
-        st.error(f"Error loading Sales Analysis file: {e}")
-        sales = pd.DataFrame()
 
-    # ---------------- PO DATES ----------------
-    po = pd.DataFrame()
-    po_path = find_file(["PO Dates.xlsx", "PO_Dates.xlsx"])
-    try:
-        po = pd.read_excel(po_path, sheet_name="GIT Report")
-
-        # FIX (root cause of nearly every blank report): open/closed status
-        # codes (20-40 open, 50-85 closed, 99 deleted) live in 'Hst', not in
-        # the 'Status' text column.
-        po['Status Code'] = pd.to_numeric(po['Hst'], errors='coerce').fillna(0)
-        po = po[(po['Status Code'] >= 20) & (po['Status Code'] <= 85) & (po['Status Code'] != 99)]
-
-        po['Item number'] = clean_id(po['Item number'])
-        po['Custom Category'] = po['Item grp'].map(cat_map).fillna('UNCLASSIFIED')
-
+    if not po.empty:
         if not sales.empty:
             po = po.merge(sales[['Item Number', 'Conversion Factor']], left_on='Item number', right_on='Item Number', how='left')
-        po['Conversion Factor'] = po.get('Conversion Factor', 1)
-        po['Conversion Factor'] = po['Conversion Factor'].fillna(1).replace(0, 1)
-        po['Buyer'] = po['Buyer'].fillna('Unassigned')
-        po['Supplier'] = po['Supplier'].fillna('Unknown Supplier')
+            po['Conversion Factor'] = po['Conversion Factor'].fillna(1.0).replace(0, 1.0)
+        else:
+            po['Conversion Factor'] = 1.0
 
+        buyer_col = [c for c in po.columns if 'buyer' in c.lower()]
+        po['Buyer'] = po[buyer_col[0]].fillna('Unassigned') if buyer_col else 'Unassigned'
+        
         for col in ['USD $', 'Order qty', 'Recd qty', 'Purch price']:
             if col in po.columns:
-                po[col] = pd.to_numeric(po[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(float)
+                po[col] = pd.to_numeric(po[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            else:
+                po[col] = 0.0
 
         po['Order Qty (Cases)'] = (po['Order qty'] / po['Conversion Factor']).round(0).astype(int)
         po['Recd Qty (Cases)'] = (po['Recd qty'] / po['Conversion Factor']).round(0).astype(int)
 
-        po['Ord dt'] = pd.to_datetime(po['Ord dt'], errors='coerce')
-        po['Req dt'] = pd.to_datetime(po['Req dt'], errors='coerce')
-        po['Arrival'] = parse_mixed_dates(po['Arrival'])
-        po['ETA'] = parse_mixed_dates(po['ETA'])
-        po['Recd dt'] = parse_mixed_dates(po['Rec dt'])
-        po['Stripped Date'] = parse_mixed_dates(po['Stripped'])
-        po['Yard Date'] = parse_mixed_dates(po['Yard'])
+        # Date Standardization
+        ord_col = [c for c in po.columns if 'ord' in c.lower() and 'dt' in c.lower()][0]
+        req_col = [c for c in po.columns if 'req' in c.lower() and 'dt' in c.lower()][0]
+        recd_col = [c for c in po.columns if 'rec' in c.lower() and 'dt' in c.lower()]
+        
+        po['Ord dt'] = pd.to_datetime(po[ord_col], errors='coerce')
+        po['Req dt'] = pd.to_datetime(po[req_col], errors='coerce')
+        po['Recd dt'] = parse_mixed_dates(po[recd_col[0]]) if recd_col else pd.NaT
+        
+        arr_col = [c for c in po.columns if 'arrival' in c.lower()]
+        eta_col = [c for c in po.columns if 'eta' in c.lower()]
+        strip_col = [c for c in po.columns if 'strip' in c.lower()]
+        yard_col = [c for c in po.columns if 'yard' in c.lower()]
 
-        po['Order Month'] = po['Ord dt'].dt.to_period('M').astype(str)
+        po['Arrival'] = parse_mixed_dates(po[arr_col[0]]) if arr_col else pd.NaT
+        po['ETA'] = parse_mixed_dates(po[eta_col[0]]) if eta_col else pd.NaT
+        po['Stripped Date'] = parse_mixed_dates(po[strip_col[0]]) if strip_col else pd.NaT
+        po['Yard Date'] = parse_mixed_dates(po[yard_col[0]]) if yard_col else pd.NaT
+
+        po['Order Month'] = po['Ord dt'].dt.to_period('M').astype(str).replace('NaT', 'Unassigned')
         po['Order Year'] = po['Ord dt'].dt.year.fillna(0).astype(int)
+        po['Arrival Variance (Days)'] = (po['Arrival'] - po['Req dt']).dt.days.fillna(0).astype(int)
 
-        # Only compute a day-variance where we actually have an Arrival date;
-        # leaving unarrived POs as NaN (rather than 0) keeps the "early vs
-        # late" histogram from being flooded with a fake spike at day 0.
-        po['Arrival Variance (Days)'] = (po['Arrival'] - po['Req dt']).dt.days
-
+        # Delivery Status Categorization
         today = pd.Timestamp.today().normalize()
-        po['Delivery Status'] = 'Not Tracked'
-        in_transit = po['Status'].isin(TRANSIT_STATUSES)
-        open_not_received = po['Recd dt'].isna() & (po['Status Code'] <= 49)
-
-        po.loc[in_transit & open_not_received, 'Delivery Status'] = 'On Track'
-        po.loc[in_transit & open_not_received & (po['Req dt'] < today), 'Delivery Status'] = 'Late (Past Req Date)'
-        po.loc[in_transit & open_not_received & (po['ETA'] < today), 'Delivery Status'] = 'Late (Past ETA)'
-        po.loc[po['Status'] == '6-Stripped', 'Delivery Status'] = 'Stripped'
-        # A Recd date present, or a closed status code, means it's in — no
-        # longer "late" regardless of ETA/Req date (per revision notes).
+        po['Delivery Status'] = 'Tracking'
+        late_mask = (po['Recd dt'].isna()) & (po['Status Code'] <= 49)
+        po.loc[(po['Req dt'] < today) & late_mask, 'Delivery Status'] = 'Late (Past Req Date)'
+        po.loc[(po['ETA'] < today) & late_mask, 'Delivery Status'] = 'Late (Past ETA)'
         po.loc[~po['Recd dt'].isna() | (po['Status Code'] > 49), 'Delivery Status'] = 'Received'
-    except Exception as e:
-        st.error(f"Error loading PO Dates file: {e}")
-        po = pd.DataFrame()
 
-    # ---------------- FORECAST ----------------
-    fc = pd.DataFrame()
-    fc_path = find_file(["CPJ FORECAST.xlsx", "CPJ_FORECAST.xlsx"])
-    try:
-        fc = pd.read_excel(fc_path, sheet_name="Sept - Mar FCST")
-        fc['Item Code'] = clean_id(fc['Item Code'])
-        # Forecast is already in cases — do NOT apply any conversion factor.
-        fc_num_cols = [c for c in fc.columns if c not in
-                       ['Brand', 'S Item Group', 'S Item Class', 'Item Code', 'Item Description', 'Supplier Name']]
+    if not fc.empty:
+        non_fc_cols = ['Brand', 'S Item Group', 'S Item Class', 'Item Code', 'Item Description', 'Supplier Name']
+        fc_num_cols = [c for c in fc.columns if c not in non_fc_cols]
         for col in fc_num_cols:
             fc[col] = pd.to_numeric(fc[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).round(0).astype(int)
+            
         if len(fc_num_cols) >= 3:
-            fc['3M_Avg_Forecast_Cases'] = fc[fc_num_cols[:3]].to_numpy().mean(axis=1).round(0).astype(int)
+            fc['3M_Avg_Forecast_Cases'] = fc[fc_num_cols[:3]].mean(axis=1).round(0).astype(int)
         else:
             fc['3M_Avg_Forecast_Cases'] = 0
-        fc.attrs['forecast_cols'] = fc_num_cols
-    except Exception as e:
-        st.error(f"Error loading CPJ Forecast file: {e}")
-        fc = pd.DataFrame()
-
-    # ---------------- BIDS ----------------
-    bids = pd.DataFrame()
-    bids_path = find_file(["BIDS.xlsx"])
-    try:
-        bids = pd.read_excel(bids_path)
-        # FIX: the old code looked for columns ('Item ', 'Description',
-        # 'Customer') that don't exist in this file. Real columns below.
-        bids = bids.rename(columns={
-            'CPJ Code': 'Item Code',
-            'CPJ Item Description': 'Item Description',
-            'Customer Name': 'Customer',
-            'CPJ Class': 'Item Class',
-            'Avg Monthly Usage ': 'Avg Monthly Usage',  # trailing space in source
-        })
-        bids['Item Code'] = clean_id(bids['Item Code'])
-        bids['Custom Category'] = bids['Item Class'].map(cat_map).fillna('UNCLASSIFIED')
-        bids['Item Status'] = pd.to_numeric(bids['Item Status'], errors='coerce')
-        bids['Avg Monthly Usage'] = pd.to_numeric(bids.get('Avg Monthly Usage', 0), errors='coerce').fillna(0)
-    except Exception as e:
-        bids = pd.DataFrame()
 
     return sales, po, fc, bids
 
 sales_df, po_df, fc_df, bids_df = load_data()
 
-if po_df.empty or sales_df.empty:
-    st.error("Core data (PO Dates / Sales Analysis) failed to load — check that the source files are in the app's working directory. See error(s) above.")
-    st.stop()
-
-# Buyer most recently associated with each item (based on full PO history)
-last_buyer_df = po_df.sort_values('Ord dt').groupby('Item number')['Buyer'].last().reset_index().rename(columns={'Buyer': 'Last Buyer'})
-
-# Full current open pipeline — deliberately NOT limited by the sidebar
-# Year/Month filters, because "what's currently on order" needs to reflect
-# true present state for Bid Performance, Reorder Exceptions, and Forecast
-# Coverage, regardless of which order-year the Executive tab happens to be
-# scoped to.
-po_active_all = po_df[(po_df['Status Code'] >= 20) & (po_df['Status Code'] <= 40)]
+# Identify Last Buyer per Item
+if not po_df.empty:
+    last_buyer_df = po_df.sort_values('Ord dt').groupby('Item number')['Buyer'].last().reset_index()
+    last_buyer_df.rename(columns={'Buyer': 'Last Buyer'}, inplace=True)
+else:
+    last_buyer_df = pd.DataFrame(columns=['Item number', 'Last Buyer'])
 
 # ----------------------------------------
 # 3. GLOBAL SLICERS (SIDEBAR)
 # ----------------------------------------
 st.sidebar.header("Global Filters")
 
-valid_years = sorted([int(y) for y in po_df['Order Year'].dropna().unique().tolist() if y >= 2020])
-default_year = [2026] if 2026 in valid_years else valid_years[-1:]
-slicer_year = st.sidebar.multiselect("Order Year", valid_years, default=default_year)
+valid_years = sorted([int(y) for y in po_df['Order Year'].unique() if y >= 2020]) if not po_df.empty else []
+slicer_year = st.sidebar.multiselect("Order Year", valid_years, default=[])
 
-clean_months = sorted([str(m) for m in po_df['Order Month'].dropna().unique() if str(m) not in ['NaT', 'nan', 'None']])
+clean_months = sorted([str(m) for m in po_df['Order Month'].unique() if str(m) not in ['NaT', 'nan', 'Unassigned']]) if not po_df.empty else []
 slicer_month = st.sidebar.multiselect("Order Month", clean_months)
 
-clean_suppliers = sorted([str(s) for s in po_df['Supplier'].dropna().unique() if str(s) not in ['nan', 'None']])
+supplier_col = [c for c in po_df.columns if 'supplier' in c.lower() or 'vendor' in c.lower()] if not po_df.empty else []
+clean_suppliers = sorted([str(s) for s in po_df[supplier_col[0]].dropna().unique() if str(s) not in ['nan', 'None']]) if supplier_col else []
 slicer_supplier = st.sidebar.multiselect("Supplier", options=clean_suppliers)
 
-clean_categories = sorted([str(c) for c in po_df['Custom Category'].dropna().unique() if str(c) not in ['nan', 'None']])
+clean_categories = sorted([str(c) for c in po_df['Custom Category'].dropna().unique() if str(c) not in ['nan', 'None']]) if not po_df.empty else []
 slicer_category = st.sidebar.multiselect("Custom Category", options=clean_categories)
 
-def filter_data(po, sales):
-    if not po.empty:
-        if slicer_year: po = po[po['Order Year'].isin(slicer_year)]
-        if slicer_month: po = po[po['Order Month'].isin(slicer_month)]
-        if slicer_supplier: po = po[po['Supplier'].isin(slicer_supplier)]
-        if slicer_category: po = po[po['Custom Category'].isin(slicer_category)]
-    if not sales.empty and slicer_category:
-        sales = sales[sales['Custom Category'].isin(slicer_category)]
-    return po, sales
+def filter_data(po, sales, fc):
+    po_out = po.copy() if not po.empty else pd.DataFrame()
+    sales_out = sales.copy() if not sales.empty else pd.DataFrame()
+    fc_out = fc.copy() if not fc.empty else pd.DataFrame()
 
-po_filtered, sales_filtered = filter_data(po_df, sales_df)
-fc_filtered = fc_df  # forecast is a point-in-time snapshot; not date-filtered
+    if not po_out.empty:
+        if slicer_year: po_out = po_out[po_out['Order Year'].isin(slicer_year)]
+        if slicer_month: po_out = po_out[po_out['Order Month'].isin(slicer_month)]
+        if slicer_supplier and supplier_col: po_out = po_out[po_out[supplier_col[0]].isin(slicer_supplier)]
+        if slicer_category: po_out = po_out[po_out['Custom Category'].isin(slicer_category)]
+
+    if slicer_category:
+        if not sales_out.empty: sales_out = sales_out[sales_out['Category'].isin(slicer_category)]
+
+    return po_out, sales_out, fc_out
+
+po_filtered, sales_filtered, fc_filtered = filter_data(po_df, sales_df, fc_df)
+
+# Active Open POs (Status 20 to 40)
 po_active = po_filtered[(po_filtered['Status Code'] >= 20) & (po_filtered['Status Code'] <= 40)] if not po_filtered.empty else pd.DataFrame()
-
-def round0(df, cols):
-    for c in cols:
-        if c in df.columns:
-            df[c] = df[c].round(0)
-    return df
 
 # ----------------------------------------
 # 4. DASHBOARD TABS
@@ -354,56 +300,43 @@ tabs = st.tabs([
 # -- TAB 1: EXECUTIVE & SPEND --
 with tabs[0]:
     st.header("Executive Summary: Category & Buyer Spend")
-
-    total_open_spend = po_active['USD $'].sum() if not po_active.empty else 0
-    total_open_vol = po_active['Order Qty (Cases)'].sum() if not po_active.empty else 0
-    total_inv_val = sales_filtered['Warehouse Inventory Value'].sum() if not sales_filtered.empty else 0
-
+    
+    total_open_spend = int(round(po_active['USD $'].sum())) if not po_active.empty else 0
+    total_po_vol = int(round(po_active['Order Qty (Cases)'].sum())) if not po_active.empty else 0
+    total_inv_val = int(round(sales_filtered['Warehouse Inventory Value'].sum())) if not sales_filtered.empty else 0
+    
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Open PO Spend", f"${total_open_spend:,.0f}")
-    col2.metric("Total Open PO Volume (Cases)", f"{total_open_vol:,.0f}")
+    col2.metric("Total PO Volume (Cases)", f"{total_po_vol:,.0f}")
     col3.metric("Current Warehouse Inventory", f"${total_inv_val:,.0f}")
-
+    
     st.divider()
-
+    
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
-        st.subheader("PO Volume (Cases) by Month — Current Year")
+        st.subheader("PO Volume (Cases) by Month (Trend)")
         if not po_filtered.empty:
             vol_summ = po_filtered.groupby('Order Month')['Order Qty (Cases)'].sum().reset_index().sort_values('Order Month')
-            vol_summ['3M Moving Avg'] = vol_summ['Order Qty (Cases)'].rolling(window=3).mean().round(0)
-
+            vol_summ['Order Qty (Cases)'] = vol_summ['Order Qty (Cases)'].astype(int)
+            vol_summ['3M Moving Avg'] = vol_summ['Order Qty (Cases)'].rolling(window=3, min_periods=1).mean().round(0).astype(int)
+            
             fig_vol = px.bar(vol_summ, x='Order Month', y='Order Qty (Cases)', title="Volume (Cases) with 3M Trend", text_auto=',.0f')
-            fig_vol.add_trace(go.Scatter(x=vol_summ['Order Month'], y=vol_summ['3M Moving Avg'], mode='lines', name='3M Avg', line=dict(color='red', width=3)))
+            fig_vol.add_trace(go.Scatter(x=vol_summ['Order Month'], y=vol_summ['3M Moving Avg'], mode='lines+markers', name='3M Avg', line=dict(color='red', width=3)))
+            fig_vol.update_layout(yaxis_title="Cases")
             st.plotly_chart(fig_vol, use_container_width=True)
         else:
-            st.info("No PO data available for the selected filters.")
-
+            st.info("No PO data available for volume trend.")
+            
     with row1_col2:
         st.subheader("Total Spend by Custom Category")
         if not po_filtered.empty:
             cat_summ = po_filtered.groupby('Custom Category')['USD $'].sum().reset_index().sort_values('USD $', ascending=True)
-            cat_summ['USD $'] = cat_summ['USD $'].round(0)
+            cat_summ['USD $'] = cat_summ['USD $'].round(0).astype(int)
             fig_cat = px.bar(cat_summ, x='USD $', y='Custom Category', orientation='h', title="Spend by Operational Category", text_auto=',.0f')
+            fig_cat.update_layout(xaxis_title="USD ($)")
             st.plotly_chart(fig_cat, use_container_width=True)
         else:
             st.info("No spend data available.")
-
-    st.subheader("PO Spend by Month — 2025 to Current")
-    # Deliberately spans 2025-present regardless of the sidebar Year filter,
-    # per the revision notes. Still respects the Category filter.
-    spend_base = po_df if not slicer_category else po_df[po_df['Custom Category'].isin(slicer_category)]
-    spend_trend = spend_base[spend_base['Order Year'] >= 2025]
-    if not spend_trend.empty:
-        sp_summ = spend_trend.groupby('Order Month')['USD $'].sum().reset_index().sort_values('Order Month')
-        sp_summ['USD $'] = sp_summ['USD $'].round(0)
-        sp_summ['3M Moving Avg'] = sp_summ['USD $'].rolling(window=3).mean().round(0)
-        fig_sp = px.bar(sp_summ, x='Order Month', y='USD $', title="PO Spend by Month (2025–Present) with 3M Trend", text_auto=',.0f')
-        fig_sp.add_trace(go.Scatter(x=sp_summ['Order Month'], y=sp_summ['3M Moving Avg'], mode='lines', name='3M Avg', line=dict(color='red', width=3)))
-        fig_sp.update_layout(xaxis_tickangle=-45)
-        st.plotly_chart(fig_sp, use_container_width=True)
-    else:
-        st.info("No PO spend data available since 2025.")
 
     st.subheader("Spend by Buyer (Consolidated <5%)")
     if not po_filtered.empty:
@@ -413,11 +346,11 @@ with tabs[0]:
             buyer_summ['Spend %'] = buyer_summ['USD $'] / total_spend
             buyer_summ.loc[buyer_summ['Spend %'] < 0.05, 'Buyer'] = 'Other Buyers'
             buyer_cons = buyer_summ.groupby('Buyer')['USD $'].sum().reset_index()
-            buyer_cons['USD $'] = buyer_cons['USD $'].round(0)
-
+            buyer_cons['USD $'] = buyer_cons['USD $'].round(0).astype(int)
+            
             fig_buyer = px.pie(buyer_cons, values='USD $', names='Buyer', hole=0.4)
-            fig_buyer.update_traces(textposition='inside', textinfo='value+percent+label', texttemplate="$%{value:,.0f}<br>%{percent}")
-            fig_buyer.update_layout(height=650, title_text='Total Commitments by Buyer')
+            fig_buyer.update_traces(textposition='inside', textinfo='value+percent+label', texttemplate="$%{value:,.0f}<br>%{percent:.0%}")
+            fig_buyer.update_layout(height=500, title_text='Total Commitments by Buyer')
             st.plotly_chart(fig_buyer, use_container_width=True)
         else:
             st.info("Zero spend recorded for selected filters.")
@@ -425,354 +358,249 @@ with tabs[0]:
 # -- TAB 2: GIT & EXPEDITING --
 with tabs[1]:
     st.header("Goods In Transit: Clearance Tracking & Exceptions")
-
+    
     st.subheader("Clearance Metrics: Stripped vs Cleared (Yard) by Month")
     if not po_filtered.empty:
-        po_git = po_filtered.copy()
-        po_git['Stripped Month'] = po_git['Stripped Date'].dt.to_period('M').astype(str)
-        po_git['Yard Month'] = po_git['Yard Date'].dt.to_period('M').astype(str)
+        container_col = [c for c in po_filtered.columns if 'container' in c.lower()]
+        cnt_field = container_col[0] if container_col else 'PO no'
 
-        strip_cnt = po_git[po_git['Stripped Month'] != 'NaT'].groupby('Stripped Month')['Container Numb'].nunique().reset_index(name='Stripped Count')
-        yard_cnt = po_git[po_git['Yard Month'] != 'NaT'].groupby('Yard Month')['Container Numb'].nunique().reset_index(name='Cleared Count')
-
-        cnt_merged = pd.merge(strip_cnt, yard_cnt, left_on='Stripped Month', right_on='Yard Month', how='outer')
-        cnt_merged['Month'] = cnt_merged['Stripped Month'].fillna(cnt_merged['Yard Month'])
-        cnt_merged = cnt_merged.dropna(subset=['Month']).sort_values('Month')
-        cnt_merged['Stripped Count'] = cnt_merged['Stripped Count'].fillna(0).astype(int)
-        cnt_merged['Cleared Count'] = cnt_merged['Cleared Count'].fillna(0).astype(int)
-
+        po_filtered['Stripped Month'] = po_filtered['Stripped Date'].dt.to_period('M').astype(str)
+        po_filtered['Yard Month'] = po_filtered['Yard Date'].dt.to_period('M').astype(str)
+        
+        strip_cnt = po_filtered[po_filtered['Stripped Month'] != 'NaT'].groupby('Stripped Month')[cnt_field].nunique().reset_index(name='Stripped Count')
+        yard_cnt = po_filtered[po_filtered['Yard Month'] != 'NaT'].groupby('Yard Month')[cnt_field].nunique().reset_index(name='Cleared Count')
+        
+        cnt_merged = pd.merge(strip_cnt, yard_cnt, left_on='Stripped Month', right_on='Yard Month', how='outer').fillna(0)
+        cnt_merged['Month'] = np.where(cnt_merged['Stripped Month'] != '0', cnt_merged['Stripped Month'], cnt_merged['Yard Month'])
+        cnt_merged = cnt_merged[cnt_merged['Month'] != '0'].sort_values('Month')
+        
+        cnt_merged['Stripped Count'] = cnt_merged['Stripped Count'].astype(int)
+        cnt_merged['Cleared Count'] = cnt_merged['Cleared Count'].astype(int)
+        
         fig_clear = go.Figure()
-        fig_clear.add_trace(go.Bar(x=cnt_merged['Month'], y=cnt_merged['Stripped Count'], name='Stripped', marker_color='royalblue', text=cnt_merged['Stripped Count']))
-        fig_clear.add_trace(go.Bar(x=cnt_merged['Month'], y=cnt_merged['Cleared Count'], name='Cleared (Yard)', marker_color='darkorange', text=cnt_merged['Cleared Count']))
-        fig_clear.add_trace(go.Scatter(x=cnt_merged['Month'], y=cnt_merged['Stripped Count'], mode='lines', name='Stripped Trend', line=dict(color='blue', dash='dot')))
-        fig_clear.add_trace(go.Scatter(x=cnt_merged['Month'], y=cnt_merged['Cleared Count'], mode='lines', name='Cleared Trend', line=dict(color='orange', dash='dot')))
-        fig_clear.update_layout(barmode='group', title="Container Processing Counts (Year to Month)", xaxis_tickangle=-45)
+        fig_clear.add_trace(go.Bar(x=cnt_merged['Month'], y=cnt_merged['Stripped Count'], name='Stripped', marker_color='royalblue', text=cnt_merged['Stripped Count'], textposition='auto'))
+        fig_clear.add_trace(go.Bar(x=cnt_merged['Month'], y=cnt_merged['Cleared Count'], name='Cleared (Yard)', marker_color='darkorange', text=cnt_merged['Cleared Count'], textposition='auto'))
+        fig_clear.update_layout(barmode='group', title="Container Processing Counts", yaxis_title="Containers")
         st.plotly_chart(fig_clear, use_container_width=True)
-    else:
-        st.info("No container data for selected filters.")
 
     st.subheader("Pending Containers / Open Orders")
-    st.caption("Containers Not Departed, On the Water, At the Port, or In the Yard — excluded once received (Recd date present) or Hst status > 49.")
     if not po_filtered.empty:
-        pending_git = po_filtered[
-            po_filtered['Status'].isin(TRANSIT_STATUSES) &
-            po_filtered['Recd dt'].isna() &
-            (po_filtered['Status Code'] <= 49)
-        ]
-        display_cols = ['Container Numb', 'PO no', 'Status', 'Supplier', 'Req dt', 'ETA', 'Delivery Status']
-        st.dataframe(pending_git[display_cols].drop_duplicates(), use_container_width=True)
-        late_count = pending_git['Delivery Status'].isin(['Late (Past Req Date)', 'Late (Past ETA)']).sum()
-        st.caption(f"{len(pending_git):,} pending containers — {late_count:,} currently flagged late.")
-    else:
-        st.info("No pending containers for the selected filters.")
+        status_str_col = [c for c in po_filtered.columns if 'status' in c.lower() and 'code' not in c.lower()][0]
+        po_no_col = [c for c in po_filtered.columns if 'po' in c.lower() and 'no' in c.lower()][0]
+        supp_col = supplier_col[0] if supplier_col else 'Supplier'
+
+        pending_git = po_filtered[(po_filtered['Recd dt'].isna()) & (po_filtered['Status Code'] <= 49)].copy()
+        
+        display_cols = [c for c in [cnt_field, po_no_col, status_str_col, supp_col, 'Req dt', 'ETA', 'Delivery Status'] if c in pending_git.columns]
+        pending_display = pending_git[display_cols].drop_duplicates()
+        
+        # Format dates without decimals/times
+        for d_col in ['Req dt', 'ETA']:
+            if d_col in pending_display.columns:
+                pending_display[d_col] = pending_display[d_col].dt.strftime('%Y-%m-%d').fillna('')
+
+        st.dataframe(pending_display)
 
     st.subheader("Early vs. Late Delivery Distribution")
     if not po_filtered.empty:
         arr_df = po_filtered.dropna(subset=['Arrival Variance (Days)'])
-        if not arr_df.empty:
-            fig_arr = px.histogram(arr_df, x='Arrival Variance (Days)', nbins=40,
-                                    title="Distribution of Delivery Timing (Negative = Early, Positive = Late Days)")
-            st.plotly_chart(fig_arr, use_container_width=True)
-        else:
-            st.info("No arrival data available yet for the selected filters.")
+        fig_arr = px.histogram(arr_df, x='Arrival Variance (Days)', nbins=30, title="Delivery Timing Spread (Negative = Days Early, Positive = Days Late)")
+        fig_arr.update_layout(yaxis_title="PO Count")
+        st.plotly_chart(fig_arr, use_container_width=True)
 
 # -- TAB 3: INVENTORY HEALTH --
 with tabs[2]:
     st.header("Inventory Health: Turnover, Dead Stock & Slow Moving")
-
-    # Shared evaluation frame used by several reports below
-    inv_eval = pd.DataFrame()
-    if not sales_filtered.empty and not fc_filtered.empty:
-        inv_eval = sales_filtered.merge(fc_filtered[['Item Code', '3M_Avg_Forecast_Cases']],
-                                         left_on='Item Number', right_on='Item Code', how='left')
-        inv_eval['3M_Avg_Forecast_Cases'] = inv_eval['3M_Avg_Forecast_Cases'].fillna(0).astype(int)
-        pipeline = po_active_all.groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases On Order (Pipeline)')
-        inv_eval = inv_eval.merge(pipeline, left_on='Item Number', right_on='Item number', how='left')
-        inv_eval['Cases On Order (Pipeline)'] = inv_eval['Cases On Order (Pipeline)'].fillna(0).astype(int)
-        inv_eval['Lead Time (Months)'] = (inv_eval['Lead time'] / 30).round(2)
-        inv_eval['Safety Stock (Cases)'] = (inv_eval['Lead Time (Months)'] * inv_eval['3M_Avg_Depletion_Demand']).round(0).astype(int)
-
-    st.subheader("Inventory Turnover & Sell-Through Ratio by Category")
+    
     if not sales_filtered.empty:
-        turn = sales_filtered.groupby('Custom Category').agg(
-            Total_Inventory_Cases=('Current_Stock_Cases', 'sum'),
-            Total_3M_Avg_Depletion=('3M_Avg_Depletion_Demand', 'sum'),
+        st.subheader("Inventory Turnover & Sell-Through Summary by Category")
+        turnover_summary = sales_filtered.groupby('Category').agg(
+            Total_Inv_Value=('Warehouse Inventory Value', 'sum'),
+            Total_Depletion=('3M_Avg_Depletion', 'sum')
         ).reset_index()
-        turn['Annualized Turnover (x)'] = np.where(turn['Total_Inventory_Cases'] > 0,
-                                                     (turn['Total_3M_Avg_Depletion'] * 4) / turn['Total_Inventory_Cases'], 0).round(0)
-        turn['Sell-Through %'] = np.where((turn['Total_3M_Avg_Depletion'] + turn['Total_Inventory_Cases']) > 0,
-                                           turn['Total_3M_Avg_Depletion'] / (turn['Total_3M_Avg_Depletion'] + turn['Total_Inventory_Cases']) * 100, 0).round(0)
-        turn = turn.sort_values('Annualized Turnover (x)', ascending=False)
+        
+        turnover_summary['Total_Inv_Value'] = turnover_summary['Total_Inv_Value'].round(0).astype(int)
+        turnover_summary['Total_Depletion'] = turnover_summary['Total_Depletion'].astype(int)
+        
+        st.dataframe(turnover_summary.style.format({
+            "Total_Inv_Value": "${:,.0f}", 
+            "Total_Depletion": "{:,.0f}"
+        }))
 
-        fig_turn = px.bar(turn, x='Custom Category', y='Annualized Turnover (x)', title="Annualized Inventory Turnover by Category", text_auto=',.0f')
-        fig_turn.update_layout(xaxis_tickangle=-45)
-        st.plotly_chart(fig_turn, use_container_width=True)
-        st.dataframe(turn.style.format({
-            "Total_Inventory_Cases": "{:,.0f}", "Total_3M_Avg_Depletion": "{:,.0f}",
-            "Annualized Turnover (x)": "{:,.0f}x", "Sell-Through %": "{:,.0f}%"
-        }), use_container_width=True)
-
-    if not inv_eval.empty:
-        inv_eval_filtered = inv_eval[~inv_eval['Custom Category'].isin(EXCLUDED_CATS)]
-
+    if not sales_filtered.empty and not fc_filtered.empty:
+        inv_eval = sales_filtered.merge(fc_filtered, left_on='Item Number', right_on='Item Code', how='left')
+        inv_eval['3M_Avg_Forecast_Cases'] = inv_eval['3M_Avg_Forecast_Cases'].fillna(0).astype(int)
+        inv_eval_filtered = inv_eval[~inv_eval['Category'].isin(EXCLUDED_CATS)]
+        
         row3_col1, row3_col2 = st.columns(2)
         with row3_col1:
             st.subheader("💀 Dead Stock by Category")
-            st.caption("Inventory on hand with no movement over the trailing 3 months.")
-            dead_stock = inv_eval_filtered[(inv_eval_filtered['Warehouse Inventory Value'] > 100) & (inv_eval_filtered['3M_Avg_Depletion'] <= 0)]
+            dead_stock = inv_eval_filtered[(inv_eval_filtered['Warehouse Inventory Value'] > 100) & (inv_eval_filtered['3M_Avg_Depletion'] == 0)]
             if not dead_stock.empty:
-                dead_cat = dead_stock.groupby('Custom Category')['Warehouse Inventory Value'].sum().round(0).reset_index()
-                fig_dead = px.bar(dead_cat, x='Custom Category', y='Warehouse Inventory Value', title="Dead Stock Value by Category", text_auto=',.0f')
-                fig_dead.update_layout(xaxis_tickangle=-45)
+                dead_cat = dead_stock.groupby('Category')['Warehouse Inventory Value'].sum().reset_index()
+                dead_cat['Warehouse Inventory Value'] = dead_cat['Warehouse Inventory Value'].round(0).astype(int)
+                fig_dead = px.bar(dead_cat, x='Category', y='Warehouse Inventory Value', title="Dead Stock Value ($)", text_auto=',.0f')
+                fig_dead.update_layout(yaxis_title="USD ($)")
                 st.plotly_chart(fig_dead, use_container_width=True)
             else:
                 st.info("No dead stock identified.")
-
+                
         with row3_col2:
             st.subheader("🐢 Slow Moving Stock by Category")
-            st.caption("Actual sales trailing >30% below the forecast (i.e. below 70% of forecast).")
             slow = inv_eval_filtered[(inv_eval_filtered['Warehouse Inventory Value'] > 0) & (inv_eval_filtered['3M_Avg_Forecast_Cases'] > 0)].copy()
             slow['Sales vs Forecast'] = slow['3M_Avg_Depletion'] / slow['3M_Avg_Forecast_Cases']
             slow_moving = slow[slow['Sales vs Forecast'] < 0.70]
             if not slow_moving.empty:
-                slow_cat = slow_moving.groupby('Custom Category')['Warehouse Inventory Value'].sum().round(0).reset_index()
-                fig_slow = px.bar(slow_cat, x='Custom Category', y='Warehouse Inventory Value', title="Slow Moving Stock Value by Category", text_auto=',.0f')
-                fig_slow.update_layout(xaxis_tickangle=-45)
+                slow_cat = slow_moving.groupby('Category')['Warehouse Inventory Value'].sum().reset_index()
+                slow_cat['Warehouse Inventory Value'] = slow_cat['Warehouse Inventory Value'].round(0).astype(int)
+                fig_slow = px.bar(slow_cat, x='Category', y='Warehouse Inventory Value', title="Slow Moving Stock Value ($)", text_auto=',.0f')
+                fig_slow.update_layout(yaxis_title="USD ($)")
                 st.plotly_chart(fig_slow, use_container_width=True)
             else:
                 st.info("No slow moving stock identified.")
 
-    st.divider()
-    st.subheader("Safety Stock vs. Current Stock Levels")
-    st.caption("Safety Stock is computed as (Lead Time ÷ 30 days) × 3-Month Avg Depletion — no explicit safety-stock field exists in the source files. Showing items currently at or below their computed threshold.")
-    if not inv_eval.empty:
-        at_risk_safety = inv_eval[(inv_eval['Safety Stock (Cases)'] > 0) & (inv_eval['Current_Stock_Cases'] <= inv_eval['Safety Stock (Cases)'] * 1.2)]
-        at_risk_safety = at_risk_safety.sort_values('Current_Stock_Cases').head(25)
-        if not at_risk_safety.empty:
-            fig_safety = go.Figure()
-            fig_safety.add_trace(go.Bar(x=at_risk_safety['Item Description'], y=at_risk_safety['Current_Stock_Cases'], name='Current Stock (Cases)', marker_color='teal'))
-            fig_safety.add_trace(go.Scatter(x=at_risk_safety['Item Description'], y=at_risk_safety['Safety Stock (Cases)'], name='Safety Stock Threshold', mode='lines+markers', line=dict(color='red', width=3)))
-            fig_safety.update_layout(title="Items At or Below Safety Stock (Top 25 by Lowest Stock)", xaxis_tickangle=-45)
-            st.plotly_chart(fig_safety, use_container_width=True)
-            st.dataframe(at_risk_safety[['Item Number', 'Item Description', 'Custom Category', 'Current_Stock_Cases', 'Safety Stock (Cases)', 'Lead Time (Months)']]
-                         .style.format({"Current_Stock_Cases": "{:,.0f}", "Safety Stock (Cases)": "{:,.0f}", "Lead Time (Months)": "{:,.1f}"}),
-                         use_container_width=True)
-        else:
-            st.info("No items currently at or below their computed safety stock threshold.")
-
-    st.subheader("Safety Stock Alerts — Significant Forecast Changes")
-    st.caption("Items where the 6-month forecast's near-term average differs from trailing actual depletion by more than 30% — buyers should reassess safety stock for these.")
-    if not inv_eval.empty:
-        fchg = inv_eval[inv_eval['3M_Avg_Depletion_Demand'] > 0].copy()
-        fchg['Forecast Change %'] = ((fchg['3M_Avg_Forecast_Cases'] - fchg['3M_Avg_Depletion_Demand']) / fchg['3M_Avg_Depletion_Demand'] * 100).round(0)
-        sig_change = fchg[fchg['Forecast Change %'].abs() > 30].sort_values('Forecast Change %', ascending=False)
-        if not sig_change.empty:
-            st.dataframe(sig_change[['Item Number', 'Item Description', 'Custom Category', '3M_Avg_Depletion_Demand',
-                                      '3M_Avg_Forecast_Cases', 'Forecast Change %', 'Safety Stock (Cases)']]
-                         .rename(columns={'3M_Avg_Depletion_Demand': 'Recent Avg Depletion (Cases)', '3M_Avg_Forecast_Cases': 'Near-Term Forecast (Cases)'})
-                         .style.format({"Recent Avg Depletion (Cases)": "{:,.0f}", "Near-Term Forecast (Cases)": "{:,.0f}",
-                                         "Forecast Change %": "{:+,.0f}%", "Safety Stock (Cases)": "{:,.0f}"}),
-                         use_container_width=True)
-        else:
-            st.info("No items with a significant forecast shift this period.")
-
-    st.divider()
-    st.subheader("Reorder Exception Summary")
-    st.caption("Items where on-hand stock + everything already on order won't outlast that item's own lead time against the near-term forecast — i.e. at risk of stocking out before a fresh order could arrive.")
-    if not inv_eval.empty:
-        reorder_base = inv_eval[inv_eval['3M_Avg_Forecast_Cases'] > 0].copy()
-        reorder_base['Months Cover (On Hand + Pipeline)'] = (
-            (reorder_base['Current_Stock_Cases'] + reorder_base['Cases On Order (Pipeline)']) / reorder_base['3M_Avg_Forecast_Cases']
-        ).round(1)
-        reorder_flag = reorder_base[reorder_base['Months Cover (On Hand + Pipeline)'] < reorder_base['Lead Time (Months)']]
-        reorder_flag = reorder_flag.merge(last_buyer_df, left_on='Item Number', right_on='Item number', how='left')
-        reorder_flag = reorder_flag.sort_values('Months Cover (On Hand + Pipeline)')
-        if not reorder_flag.empty:
-            st.dataframe(reorder_flag[['Item Number', 'Item Description', 'Custom Category', 'Current_Stock_Cases',
-                                        'Cases On Order (Pipeline)', '3M_Avg_Forecast_Cases', 'Lead Time (Months)',
-                                        'Months Cover (On Hand + Pipeline)', 'Last Buyer']]
-                         .rename(columns={'Current_Stock_Cases': 'Current Stock (Cases)', '3M_Avg_Forecast_Cases': 'Near-Term Forecast (Cases)'})
-                         .style.format({"Current Stock (Cases)": "{:,.0f}", "Cases On Order (Pipeline)": "{:,.0f}",
-                                         "Near-Term Forecast (Cases)": "{:,.0f}", "Lead Time (Months)": "{:,.1f}",
-                                         "Months Cover (On Hand + Pipeline)": "{:,.1f}"}),
-                         use_container_width=True, height=400)
-            st.caption(f"{len(reorder_flag):,} items flagged for reorder attention.")
-        else:
-            st.info("No items currently flagged for reorder.")
+    st.subheader("Current Stock Levels (Top Active Items)")
+    if not sales_filtered.empty:
+        viz_safety_df = sales_filtered[sales_filtered['Current_Stock_Cases'] >= 10].head(25)
+        fig_safety = go.Figure()
+        fig_safety.add_trace(go.Bar(x=viz_safety_df['Item Description'], y=viz_safety_df['Current_Stock_Cases'], name='Current Stock (Cases)', marker_color='teal', text=viz_safety_df['Current_Stock_Cases'], textposition='auto'))
+        fig_safety.update_layout(title="Actual Stock Levels (Sample Items ≥ 10 Cases)", xaxis_tickangle=-45, yaxis_title="Cases")
+        st.plotly_chart(fig_safety, use_container_width=True)
 
 # -- TAB 4: BID PERFORMANCE --
 with tabs[3]:
     st.header("🏆 Bid Customer Fulfillment & Coverage")
-
-    if not bids_df.empty and not sales_df.empty:
-        bids_current = bids_df[(bids_df['Bid Status'] == 'Current') & (bids_df['Item Status'] != 99)].copy()
-
-        bid_items = bids_current.groupby('Item Code').agg(
-            Item_Description=('Item Description', 'first'),
-            Custom_Category=('Custom Category', 'first'),
-            Customer_Count=('Customer', 'nunique'),
-        ).reset_index()
-
-        bid_items = bid_items.merge(sales_df[['Item Number', 'Current_Stock_Cases', '3M_Avg_Depletion_Demand']],
-                                     left_on='Item Code', right_on='Item Number', how='left')
-        bid_items['Current_Stock_Cases'] = bid_items['Current_Stock_Cases'].fillna(0).astype(int)
-        bid_items['3M_Avg_Depletion_Demand'] = bid_items['3M_Avg_Depletion_Demand'].fillna(0).astype(int)
-
-        po_port = po_active_all[po_active_all['Status'].isin(PORT_STATUSES)].groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases At Port')
-        po_order = po_active_all[~po_active_all['Status'].isin(PORT_STATUSES)].groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases On Order')
-
-        bid_items = bid_items.merge(po_port, left_on='Item Code', right_on='Item number', how='left')
-        bid_items = bid_items.merge(po_order, left_on='Item Code', right_on='Item number', how='left', suffixes=('', '_ord'))
-        bid_items = bid_items.merge(last_buyer_df, left_on='Item Code', right_on='Item number', how='left', suffixes=('', '_buyer'))
-        bid_items['Cases At Port'] = bid_items['Cases At Port'].fillna(0).astype(int)
-        bid_items['Cases On Order'] = bid_items['Cases On Order'].fillna(0).astype(int)
-
-        bid_items['Months of Stock'] = np.where(bid_items['3M_Avg_Depletion_Demand'] > 0,
-                                                 (bid_items['Current_Stock_Cases'] / bid_items['3M_Avg_Depletion_Demand']).round(1), np.nan)
-
-        bid_items['Availability Status'] = 'Not In Stock'
-        bid_items.loc[bid_items['Cases On Order'] > 0, 'Availability Status'] = 'On Order'
-        bid_items.loc[bid_items['Cases At Port'] > 0, 'Availability Status'] = 'Inventory @ Port'
-        bid_items.loc[bid_items['Current_Stock_Cases'] > 0, 'Availability Status'] = 'Available'
-
-        st.subheader("Bid Item Stock Coverage by Category")
-        st.caption("Unique bid items, summarized by category — current stock, on order, and months of stock on hand.")
-        cov_by_cat = bid_items.groupby('Custom_Category').agg(
-            Item_Count=('Item Code', 'nunique'),
-            Current_Stock_Cases=('Current_Stock_Cases', 'sum'),
-            Cases_At_Port=('Cases At Port', 'sum'),
-            Cases_On_Order=('Cases On Order', 'sum'),
-            Avg_Months_of_Stock=('Months of Stock', 'mean'),
-        ).reset_index().sort_values('Current_Stock_Cases', ascending=False)
-        cov_by_cat['Avg_Months_of_Stock'] = cov_by_cat['Avg_Months_of_Stock'].round(1)
-        st.dataframe(cov_by_cat.rename(columns={
-            'Custom_Category': 'Category', 'Item_Count': 'Items', 'Current_Stock_Cases': 'Current Stock (Cases)',
-            'Cases_At_Port': 'Cases at Port', 'Cases_On_Order': 'Cases On Order', 'Avg_Months_of_Stock': 'Avg Months of Stock'
-        }).style.format({"Current Stock (Cases)": "{:,.0f}", "Cases at Port": "{:,.0f}", "Cases On Order": "{:,.0f}",
-                          "Avg Months of Stock": "{:,.1f}", "Items": "{:,.0f}"}),
-                     use_container_width=True)
-
-        colA, colB = st.columns([1, 1])
+    
+    if not bids_df.empty and not sales_filtered.empty:
+        bids_merged = bids_df.merge(sales_filtered[['Item Number', 'Current_Stock_Cases', 'Category']], on='Item Number', how='left')
+        bids_merged['Current_Stock_Cases'] = bids_merged['Current_Stock_Cases'].fillna(0).astype(int)
+        
+        status_str_col = [c for c in po_active.columns if 'status' in c.lower() and 'code' not in c.lower()] if not po_active.empty else []
+        if status_str_col:
+            port_statuses = [s for s in po_active[status_str_col[0]].unique() if 'port' in str(s).lower() or 'yard' in str(s).lower()]
+            po_port = po_active[po_active[status_str_col[0]].isin(port_statuses)].groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases At Port')
+            po_order = po_active[~po_active[status_str_col[0]].isin(port_statuses)].groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases On Order')
+        else:
+            po_port = pd.DataFrame(columns=['Item number', 'Cases At Port'])
+            po_order = pd.DataFrame(columns=['Item number', 'Cases On Order'])
+        
+        bids_merged = bids_merged.merge(po_port, left_on='Item Number', right_on='Item number', how='left').fillna(0)
+        bids_merged = bids_merged.merge(po_order, left_on='Item Number', right_on='Item number', how='left').fillna(0)
+        bids_merged = bids_merged.merge(last_buyer_df, left_on='Item Number', right_on='Item number', how='left')
+        
+        for col in ['Cases At Port', 'Cases On Order']:
+            bids_merged[col] = bids_merged[col].astype(int)
+        
+        bids_merged['Availability Status'] = 'Not In Stock'
+        bids_merged.loc[bids_merged['Cases At Port'] > 0, 'Availability Status'] = 'Inventory @ Port'
+        bids_merged.loc[bids_merged['Current_Stock_Cases'] > 0, 'Availability Status'] = 'Available'
+        
+        colA, colB = st.columns([1, 2])
         with colA:
-            st.subheader("Overall Bid Item Availability")
-            fig_bids = px.pie(bid_items, names='Availability Status', title="Availability Breakdown (Unique Bid Items)",
-                               color='Availability Status',
-                               color_discrete_map={'Available': 'green', 'Inventory @ Port': 'orange', 'On Order': 'gold', 'Not In Stock': 'red'})
+            fig_bids = px.pie(
+                bids_merged, names='Availability Status', title="Bid Item Availability Breakdown", color='Availability Status',
+                color_discrete_map={'Available': 'green', 'Inventory @ Port': 'orange', 'Not In Stock': 'red'}
+            )
             st.plotly_chart(fig_bids, use_container_width=True)
-
+            
         with colB:
-            st.subheader("Stock vs. Ongoing Demand, by Category")
-            st.caption("'Committed' uses 3-month avg depletion (cases) as a practical demand proxy — the bid file's own usage figures are in customer units (e.g. KG), not cases, and can't be reliably converted.")
-            demand_cat = bid_items.groupby('Custom_Category').agg(
-                Stock=('Current_Stock_Cases', 'sum'), Demand=('3M_Avg_Depletion_Demand', 'sum')
-            ).reset_index()
-            fig_demand = go.Figure()
-            fig_demand.add_trace(go.Bar(x=demand_cat['Custom_Category'], y=demand_cat['Stock'], name='Current Stock (Cases)'))
-            fig_demand.add_trace(go.Bar(x=demand_cat['Custom_Category'], y=demand_cat['Demand'], name='3M Avg Demand (Cases)'))
-            fig_demand.update_layout(barmode='group', xaxis_tickangle=-45, title="Stock vs. Demand by Category")
-            st.plotly_chart(fig_demand, use_container_width=True)
+            st.subheader("Critical Bid Items (No Stock & No Pipeline)")
+            critical = bids_merged[(bids_merged['Current_Stock_Cases'] == 0) & (bids_merged['Cases On Order'] == 0) & (bids_merged['Cases At Port'] == 0)]
+            desc_col = [c for c in critical.columns if 'desc' in c.lower()]
+            cust_col = [c for c in critical.columns if 'cust' in c.lower()]
+            disp_crit_cols = ['Item Number'] + ([desc_col[0]] if desc_col else []) + ([cust_col[0]] if cust_col else []) + ['Last Buyer']
+            st.dataframe(critical[[c for c in disp_crit_cols if c in critical.columns]])
 
-        st.subheader("⚠️ At-Risk Bid Items — No Stock, Not On Order, Not At Port")
-        st.caption("Requires buyer attention to replenish.")
-        critical = bid_items[(bid_items['Current_Stock_Cases'] == 0) & (bid_items['Cases On Order'] == 0) & (bid_items['Cases At Port'] == 0)]
-        st.dataframe(critical[['Item Code', 'Item_Description', 'Custom_Category', 'Customer_Count', 'Last Buyer']]
-                     .rename(columns={'Item_Description': 'Description', 'Custom_Category': 'Category', 'Customer_Count': '# Bid Customers'}),
-                     use_container_width=True)
-        st.caption(f"{len(critical):,} of {len(bid_items):,} unique bid items are currently at risk.")
-
-        with st.expander("All Bid Item Coverage (detail)"):
-            st.dataframe(bid_items[['Item Code', 'Item_Description', 'Custom_Category', 'Customer_Count', 'Last Buyer',
-                                     'Current_Stock_Cases', 'Cases At Port', 'Cases On Order', 'Months of Stock', 'Availability Status']]
-                         .rename(columns={'Item_Description': 'Description', 'Custom_Category': 'Category', 'Customer_Count': '# Bid Customers',
-                                           'Current_Stock_Cases': 'Current Stock (Cases)'})
-                         .style.format({"Current Stock (Cases)": "{:,.0f}", "Cases At Port": "{:,.0f}", "Cases On Order": "{:,.0f}",
-                                         "Months of Stock": "{:,.1f}"}),
-                         use_container_width=True)
+        st.subheader("All Bid Item Coverages")
+        disp_bid_cols = ['Item Number'] + ([desc_col[0]] if desc_col else []) + ([cust_col[0]] if cust_col else []) + ['Last Buyer', 'Current_Stock_Cases', 'Cases At Port', 'Cases On Order']
+        bids_disp = bids_merged[[c for c in disp_bid_cols if c in bids_merged.columns]].copy()
+        st.dataframe(bids_disp.style.format({
+            "Current_Stock_Cases": "{:,.0f}", 
+            "Cases At Port": "{:,.0f}", 
+            "Cases On Order": "{:,.0f}"
+        }))
     else:
-        st.info("Bid data not loaded.")
+        st.info("Bid data not loaded or Sales Analysis missing.")
 
 # -- TAB 5: FORECAST --
 with tabs[4]:
     st.header("6-Month Forecast")
-
+    
     search_term = st.text_input("🔍 Search Item Code or Description:", "")
-
+    
     if not fc_filtered.empty:
         fc_display = fc_filtered.copy()
         if search_term:
-            fc_display = fc_display[fc_display['Item Code'].str.contains(search_term, case=False, na=False) |
-                                     fc_display['Item Description'].str.contains(search_term, case=False, na=False)]
-
-        forecast_cols = fc_filtered.attrs.get('forecast_cols', [])[:6]  # first 6 months only
-
+            fc_display = fc_display[
+                fc_display['Item Code'].str.contains(search_term, case=False, na=False) | 
+                fc_display['Item Description'].str.contains(search_term, case=False, na=False)
+            ]
+        
+        non_fc_cols = ['Brand', 'S Item Group', 'S Item Class', 'Item Code', 'Item Description', 'Supplier Name', '3M_Avg_Forecast_Cases']
+        forecast_cols = [c for c in fc_display.columns if c not in non_fc_cols]
+        
         high_vol = fc_display[fc_display['3M_Avg_Forecast_Cases'] >= 10].sort_values(by='3M_Avg_Forecast_Cases', ascending=False)
-
+        
         if not high_vol.empty and forecast_cols:
-            high_vol_melt = high_vol.melt(id_vars=['Item Code', 'Item Description'], value_vars=forecast_cols, var_name='Month', value_name='Forecasted Cases')
+            high_vol_melt = high_vol.melt(id_vars=['Item Code', 'Item Description'], value_vars=forecast_cols[:6], var_name='Month', value_name='Forecasted Cases')
             agg_forecast = high_vol_melt.groupby('Month', sort=False)['Forecasted Cases'].sum().reset_index()
-            agg_forecast['Month'] = pd.Categorical(agg_forecast['Month'], categories=forecast_cols, ordered=True)
-            agg_forecast = agg_forecast.sort_values('Month')
-
-            fig_fc = px.bar(agg_forecast, x='Month', y='Forecasted Cases', title='6-Month Forecast', text_auto=',.0f')
-            fig_fc.update_traces(marker_color='darkmagenta', textfont=dict(size=14, color='white'))
+            agg_forecast['Forecasted Cases'] = agg_forecast['Forecasted Cases'].astype(int)
+            
+            fig_fc = px.area(agg_forecast, x='Month', y='Forecasted Cases', title='6-Month Forecast Pipeline', text='Forecasted Cases')
+            fig_fc.update_traces(textposition='top center', line=dict(width=3, color='darkmagenta'), fillcolor='rgba(139, 0, 139, 0.3)')
             fig_fc.update_layout(xaxis_title="Forecast Month", yaxis_title="Total Cases")
             st.plotly_chart(fig_fc, use_container_width=True)
-
-            st.dataframe(high_vol[['Item Code', 'Item Description', '3M_Avg_Forecast_Cases'] + forecast_cols]
-                         .rename(columns={'3M_Avg_Forecast_Cases': 'Near-Term Avg (Cases)'})
-                         .style.format("{:,.0f}", subset=forecast_cols + ['Near-Term Avg (Cases)']),
-                         use_container_width=True)
+            
+            disp_fc_cols = ['Item Code', 'Item Description', '3M_Avg_Forecast_Cases'] + forecast_cols[:6]
+            st.dataframe(high_vol[[c for c in disp_fc_cols if c in high_vol.columns]].style.format("{:,.0f}"))
         else:
             st.info("No forecast items meeting the criteria (≥ 10 Cases Avg).")
 
-        st.subheader("Category Forecast Coverage")
-        st.caption("Uses the full current open-order pipeline (not limited by the sidebar Year/Month filters), so coverage reflects true present state.")
-        if not sales_df.empty:
-            po_order_agg = po_active_all.groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases On Order')
-
-            fc_cov = fc_display.merge(sales_df[['Item Number', 'Current_Stock_Cases', 'Custom Category']], left_on='Item Code', right_on='Item Number', how='left')
-            fc_cov = fc_cov.merge(po_order_agg, left_on='Item Code', right_on='Item number', how='left')
-            fc_cov['Current_Stock_Cases'] = fc_cov['Current_Stock_Cases'].fillna(0)
-            fc_cov['Cases On Order'] = fc_cov['Cases On Order'].fillna(0)
-
-            cov_summary = fc_cov.groupby('Custom Category').agg({
-                'Current_Stock_Cases': 'sum', 'Cases On Order': 'sum', '3M_Avg_Forecast_Cases': 'sum'
+        st.subheader("Category Forecast Coverage Summary")
+        if not sales_filtered.empty:
+            po_order_agg = po_active.groupby('Item number')['Order Qty (Cases)'].sum().reset_index(name='Cases On Order') if not po_active.empty else pd.DataFrame(columns=['Item number', 'Cases On Order'])
+            
+            fc_cov = fc_display.merge(sales_filtered[['Item Number', 'Current_Stock_Cases', 'Category']], left_on='Item Code', right_on='Item Number', how='left')
+            fc_cov = fc_cov.merge(po_order_agg, left_on='Item Code', right_on='Item number', how='left').fillna(0)
+            
+            cov_summary = fc_cov.groupby('Category').agg({
+                'Current_Stock_Cases': 'sum',
+                'Cases On Order': 'sum',
+                '3M_Avg_Forecast_Cases': 'sum'
             }).reset_index()
-
-            cov_summary['Stock Coverage (Months)'] = np.where(cov_summary['3M_Avg_Forecast_Cases'] > 0,
-                                                                cov_summary['Current_Stock_Cases'] / cov_summary['3M_Avg_Forecast_Cases'], 0).round(1)
-            cov_summary['Coverage w/ On-Order (Months)'] = np.where(cov_summary['3M_Avg_Forecast_Cases'] > 0,
-                                                                      (cov_summary['Current_Stock_Cases'] + cov_summary['Cases On Order']) / cov_summary['3M_Avg_Forecast_Cases'], 0).round(1)
-
-            st.dataframe(cov_summary.rename(columns={'Custom Category': 'Category', 'Current_Stock_Cases': 'Current Stock (Cases)',
-                                                       '3M_Avg_Forecast_Cases': 'Near-Term Forecast (Cases)'})
-                         .style.format({"Current Stock (Cases)": "{:,.0f}", "Cases On Order": "{:,.0f}", "Near-Term Forecast (Cases)": "{:,.0f}",
-                                         "Stock Coverage (Months)": "{:,.1f}", "Coverage w/ On-Order (Months)": "{:,.1f}"}),
-                         use_container_width=True)
+            
+            cov_summary['Current_Stock_Cases'] = cov_summary['Current_Stock_Cases'].astype(int)
+            cov_summary['Cases On Order'] = cov_summary['Cases On Order'].astype(int)
+            cov_summary['3M_Avg_Forecast_Cases'] = cov_summary['3M_Avg_Forecast_Cases'].astype(int)
+            
+            cov_summary['MDC Stock Coverage (Months)'] = np.where(cov_summary['3M_Avg_Forecast_Cases'] > 0, (cov_summary['Current_Stock_Cases'] / cov_summary['3M_Avg_Forecast_Cases']).round(0), 0).astype(int)
+            cov_summary['Total Coverage w/ On-Order (Months)'] = np.where(cov_summary['3M_Avg_Forecast_Cases'] > 0, ((cov_summary['Current_Stock_Cases'] + cov_summary['Cases On Order']) / cov_summary['3M_Avg_Forecast_Cases']).round(0), 0).astype(int)
+            
+            st.dataframe(cov_summary[['Category', 'Current_Stock_Cases', 'Cases On Order', '3M_Avg_Forecast_Cases', 'MDC Stock Coverage (Months)', 'Total Coverage w/ On-Order (Months)']].style.format("{:,.0f}"))
 
 # -- TAB 6: SUPPLIER SCORECARD --
 with tabs[5]:
     st.header("Supplier Scorecard: Reliability & Fill Rates")
-
-    if not po_filtered.empty:
+    
+    if not po_filtered.empty and supplier_col:
         vendor_search = st.text_input("🔍 Search Vendor / Supplier:", "")
         po_score_df = po_filtered.copy()
         if vendor_search:
-            po_score_df = po_score_df[po_score_df['Supplier'].str.contains(vendor_search, case=False, na=False)]
-
+            po_score_df = po_score_df[po_score_df[supplier_col[0]].str.contains(vendor_search, case=False, na=False)]
+            
         po_recd = po_score_df[(po_score_df['Order qty'] > 0) & (po_score_df['Recd qty'] > 0)].copy()
-        po_recd['Fill Deviation %'] = ((po_recd['Recd qty'] / po_recd['Order qty']) - 1) * 100
-
-        st.subheader("Top 10 Inconsistent Vendors (Ordered vs Received Deviation)")
         if not po_recd.empty:
-            fill_summ = po_recd.groupby('Supplier')['Fill Deviation %'].apply(lambda x: abs(x).mean()).reset_index().sort_values('Fill Deviation %', ascending=False).head(10)
-            fill_summ['Fill Deviation %'] = fill_summ['Fill Deviation %'].round(0)
-
-            fig_fill = px.bar(fill_summ, x='Fill Deviation %', y='Supplier', orientation='h', title="Top 10 Vendors by Absolute Avg % Deviation", text_auto=',.0f')
-            fig_fill.update_layout(yaxis={'categoryorder': 'total ascending'})
+            po_recd['Fill Deviation %'] = ((po_recd['Recd qty'] / po_recd['Order qty']) - 1) * 100
+            
+            st.subheader("Top 10 Inconsistent Vendors (Ordered vs Received Deviation)")
+            fill_summ = po_recd.groupby(supplier_col[0])['Fill Deviation %'].apply(lambda x: abs(x).mean()).reset_index().sort_values('Fill Deviation %', ascending=False).head(10)
+            fill_summ['Fill Deviation %'] = fill_summ['Fill Deviation %'].round(0).astype(int)
+            
+            fig_fill = px.bar(fill_summ, x='Fill Deviation %', y=supplier_col[0], orientation='h', title="Top 10 Vendors by Absolute Avg % Deviation", text_auto=',.0f')
+            fig_fill.update_layout(yaxis={'categoryorder': 'total ascending'}, xaxis_title="Avg Deviation (%)")
             st.plotly_chart(fig_fill, use_container_width=True)
         else:
-            st.info("No received-quantity data available for the selected filters.")
+            st.info("No completed receipt records available for supplier scorecard calculation.")
 
 # -- TAB 7: CASH FLOW --
 with tabs[6]:
@@ -782,62 +610,84 @@ with tabs[6]:
         if not cf_df.empty:
             cf_df['ETA Month'] = cf_df['ETA'].dt.to_period('M').astype(str)
             cf_summ = cf_df.groupby('ETA Month')['USD $'].sum().reset_index().sort_values('ETA Month')
-            cf_summ['USD $'] = cf_summ['USD $'].round(0)
-
+            cf_summ['USD $'] = cf_summ['USD $'].round(0).astype(int)
+            
             fig_cf = px.bar(cf_summ, x='ETA Month', y='USD $', title='Capital Required Based on Expected Arrival (USD)', text_auto=',.0f')
-            fig_cf.update_layout(xaxis_tickangle=-45)
+            fig_cf.update_layout(yaxis_title="USD ($)")
             st.plotly_chart(fig_cf, use_container_width=True)
         else:
-            st.info("No active POs with both an ETA and a USD value for the selected filters.")
+            st.info("No active POs found with valid ETA dates.")
     else:
-        st.info("No active PO cash flow data available for the selected filters.")
+        st.info("No active PO cash flow data available with ETA routing.")
 
 # -- TAB 8: PRICE INDEX (PPV) --
 with tabs[7]:
     st.header("Procurement & Price Index (PPV Trend)")
     st.markdown("Tracks wholesale unit price fluctuations over time for key commodities to evaluate supplier price creep.")
+    
+    if not po_df.empty:
+        hist_prices = po_df[(po_df['Purch price'] > 0) & (po_df['Item number'].notna())].copy()
+        hist_prices = hist_prices.sort_values('Ord dt')
+        
+        desc_po_col = [c for c in po_df.columns if 'desc' in c.lower()]
+        item_search = st.text_input("🔍 Search Item for Price Trend (Code or Description):")
+        
+        if item_search:
+            mask = hist_prices['Item number'].str.contains(item_search, case=False, na=False)
+            if desc_po_col:
+                mask = mask | hist_prices[desc_po_col[0]].str.contains(item_search, case=False, na=False)
+            
+            trend_df = hist_prices[mask]
+            if not trend_df.empty:
+                supp_col = supplier_col[0] if supplier_col else 'Supplier'
+                fig_trend = px.line(trend_df, x='Ord dt', y='Purch price', color=supp_col, markers=True, title=f"Historical Unit Price Trend for '{item_search}'")
+                fig_trend.update_layout(yaxis_title="Unit Price ($)")
+                st.plotly_chart(fig_trend, use_container_width=True)
+            else:
+                st.warning("No price history found for this item.")
+                
+        if not po_active.empty and not sales_filtered.empty:
+            ppv_df = po_active[po_active['Purch price'] > 0].merge(sales_filtered[['Item Number', 'Last Price']], left_on='Item number', right_on='Item Number', how='left')
+            ppv_df['Last Price'] = ppv_df['Last Price'].fillna(0)
+            ppv_df['Variance ($)'] = (ppv_df['Purch price'] - ppv_df['Last Price']).round(0).astype(int)
+            
+            ppv_df['Variance (%)'] = np.where(
+                ppv_df['Last Price'] > 0, 
+                ((ppv_df['Purch price'] - ppv_df['Last Price']) / ppv_df['Last Price'] * 100).round(0), 
+                0
+            ).astype(int)
+            
+            po_no_col = [c for c in po_active.columns if 'po' in c.lower() and 'no' in c.lower()][0]
+            supp_col = supplier_col[0] if supplier_col else 'Supplier'
+            item_desc_field = desc_po_col[0] if desc_po_col else 'Item number'
 
-    hist_prices = po_df[(po_df['Purch price'] > 0) & (po_df['Item number'].notna())].copy()
-    hist_prices = hist_prices.sort_values('Ord dt')
+            disp_ppv_cols = [po_no_col, supp_col, item_desc_field, 'Purch price', 'Last Price', 'Variance (%)']
+            
+            colX, colY = st.columns(2)
+            with colX:
+                st.subheader("Inflation: Active Price Increases (>5%)")
+                inc = ppv_df[ppv_df['Variance (%)'] > 5].sort_values('Variance (%)', ascending=False)
+                if not inc.empty:
+                    inc_disp = inc[[c for c in disp_ppv_cols if c in inc.columns]].head(15)
+                    st.dataframe(inc_disp.style.format({
+                        'Purch price': "${:,.0f}", 
+                        'Last Price': "${:,.0f}", 
+                        'Variance (%)': "{:,.0f}%"
+                    }))
+                else:
+                    st.info("No significant price increases identified.")
 
-    item_search = st.text_input("🔍 Search Item for Price Trend (Code or Description):")
-    if item_search:
-        trend_df = hist_prices[hist_prices['Item number'].str.contains(item_search, case=False, na=False) |
-                                hist_prices['ItemDescription'].str.contains(item_search, case=False, na=False)]
-        if not trend_df.empty:
-            fig_trend = px.line(trend_df, x='Ord dt', y='Purch price', color='Supplier', markers=True, title=f"Historical Price Trend for {item_search}")
-            st.plotly_chart(fig_trend, use_container_width=True)
-        else:
-            st.warning("No price history found for this item.")
+            with colY:
+                st.subheader("Savings: Secured Cost Reductions (<-5%)")
+                dec = ppv_df[ppv_df['Variance (%)'] < -5].sort_values('Variance (%)', ascending=True)
+                if not dec.empty:
+                    dec_disp = dec[[c for c in disp_ppv_cols if c in dec.columns]].head(15)
+                    st.dataframe(dec_disp.style.format({
+                        'Purch price': "${:,.0f}", 
+                        'Last Price': "${:,.0f}", 
+                        'Variance (%)': "{:,.0f}%"
+                    }))
+                else:
+                    st.info("No significant price reductions identified.")
     else:
-        st.subheader("Overall Purchase Price Trend (All Items)")
-        monthly_price = hist_prices.copy()
-        monthly_price['Order Month'] = monthly_price['Ord dt'].dt.to_period('M').astype(str)
-        avg_price_trend = monthly_price.groupby('Order Month')['Purch price'].mean().round(0).reset_index()
-        avg_price_trend = avg_price_trend.sort_values('Order Month')
-        fig_overall = px.line(avg_price_trend, x='Order Month', y='Purch price', markers=True, title="Average PO Unit Price by Month (All Items)")
-        fig_overall.update_layout(xaxis_tickangle=-45)
-        st.plotly_chart(fig_overall, use_container_width=True)
-        st.caption("Search an item above to drill into its individual price history by supplier.")
-
-    if not po_active.empty and not sales_filtered.empty:
-        ppv_df = po_active[po_active['Purch price'] > 0].merge(sales_filtered[['Item Number', 'Last Price']], left_on='Item number', right_on='Item Number', how='left')
-        ppv_df = ppv_df.dropna(subset=['Last Price'])
-        ppv_df['Variance ($)'] = ppv_df['Purch price'] - ppv_df['Last Price']
-        ppv_df['Variance (%)'] = np.where(ppv_df['Last Price'] > 0, (ppv_df['Variance ($)'] / ppv_df['Last Price']) * 100, 0)
-
-        colX, colY = st.columns(2)
-        with colX:
-            st.subheader("Inflation: Active Price Increases")
-            inc = ppv_df[ppv_df['Variance (%)'] > 5].sort_values('Variance (%)', ascending=False)
-            st.dataframe(inc[['PO no', 'Supplier', 'ItemDescription', 'Purch price', 'Last Price', 'Variance (%)']].head(15)
-                         .style.format({'Purch price': "${:,.0f}", 'Last Price': "${:,.0f}", 'Variance (%)': "{:.0f}%"}),
-                         use_container_width=True)
-        with colY:
-            st.subheader("Savings: Secured Cost Reductions")
-            dec = ppv_df[ppv_df['Variance (%)'] < -5].sort_values('Variance (%)', ascending=True)
-            st.dataframe(dec[['PO no', 'Supplier', 'ItemDescription', 'Purch price', 'Last Price', 'Variance (%)']].head(15)
-                         .style.format({'Purch price': "${:,.0f}", 'Last Price': "${:,.0f}", 'Variance (%)': "{:.0f}%"}),
-                         use_container_width=True)
-    else:
-        st.info("Insufficient PO historical data for PPV calculation with current filters.")
+        st.info("Insufficient PO historical data for PPV Calculation.")
