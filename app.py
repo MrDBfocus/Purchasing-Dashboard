@@ -75,6 +75,20 @@ today = pd.Timestamp.today().normalize()
 # ----------------------------------------
 # HELPERS
 # ----------------------------------------
+from contextlib import contextmanager
+import traceback
+
+
+@contextmanager
+def guard():
+    """Keep one tab's error from blanking every tab after it."""
+    try:
+        yield
+    except Exception as e:
+        st.error(f"This tab hit an error: {type(e).__name__}: {e}")
+        st.code(traceback.format_exc())
+
+
 def find_file(candidates):
     for c in candidates:
         p = os.path.join(DATA_DIR, c)
@@ -354,7 +368,7 @@ tabs = st.tabs(["📊 Executive Spend", "🚢 GIT & Expediting", "⚠️ Invento
 # ==========================================================================
 # TAB 1 — EXECUTIVE SPEND
 # ==========================================================================
-with tabs[0]:
+with tabs[0], guard():
     st.header("Executive Summary: Category & Buyer Spend")
     st.caption("Otp = P01 orders are excluded." if not include_p01 else "Otp = P01 orders are INCLUDED (sidebar toggle).")
 
@@ -415,7 +429,7 @@ with tabs[0]:
 # ==========================================================================
 # TAB 2 — GIT & EXPEDITING
 # ==========================================================================
-with tabs[1]:
+with tabs[1], guard():
     st.header("Goods In Transit: Clearance Tracking & Exceptions")
 
     st.subheader("Clearance Metrics: Stripped vs Cleared (Yard) by Month")
@@ -546,9 +560,9 @@ with tabs[1]:
         p1, p2 = st.columns(2)
         with p1:
             mo = dp.groupby(['Recd Month', 'Bucket']).size().reset_index(name='Lines')
-            fig = px.bar(mo, x='Recd Month', y='Lines', color='Bucket', color_discrete_map=b_cols, barnorm='percent',
+            fig = px.bar(mo, x='Recd Month', y='Lines', color='Bucket', color_discrete_map=b_cols,
                          category_orders={'Bucket': list(b_cols.keys())}, title="Delivery timing mix by month received (% of lines)")
-            fig.update_layout(yaxis_title="% of lines", xaxis_tickangle=-45)
+            fig.update_layout(barnorm='percent', yaxis_title="% of lines", xaxis_tickangle=-45)
             st.plotly_chart(fig, use_container_width=True)
         with p2:
             cat = dp.groupby('Custom Category').agg(Lines=('PO no', 'size'), OnTime=('Days Late', lambda s: (s <= 0).mean() * 100)).reset_index().sort_values('OnTime')
@@ -582,7 +596,7 @@ with tabs[1]:
 # ==========================================================================
 # TAB 3 — INVENTORY HEALTH
 # ==========================================================================
-with tabs[2]:
+with tabs[2], guard():
     st.header("Inventory Health: Turnover, Dead Stock & Slow Moving")
 
     st.subheader("Inventory Turnover & Sell-Through by Category")
@@ -776,7 +790,7 @@ with tabs[2]:
 # ==========================================================================
 # TAB 4 — BID PERFORMANCE
 # ==========================================================================
-with tabs[3]:
+with tabs[3], guard():
     st.header("🏆 Bid Customer Fulfillment & Coverage")
     if bids_df.empty:
         st.info("Bid data not loaded.")
@@ -910,7 +924,7 @@ with tabs[3]:
 # ==========================================================================
 # TAB 5 — FORECAST
 # ==========================================================================
-with tabs[4]:
+with tabs[4], guard():
     st.header("6-Month Forecast")
     if fc_df.empty:
         st.info("Forecast data not loaded.")
@@ -961,7 +975,7 @@ with tabs[4]:
 # ==========================================================================
 # TAB 6 — SUPPLIER SCORECARD
 # ==========================================================================
-with tabs[5]:
+with tabs[5], guard():
     st.header("Supplier Scorecard: Reliability, Fill & Timeliness")
     st.caption("Fill outcome per line: received/closed lines (Hst 75-85) use received ÷ ordered. Lines dropped to Hst 99 on a PO that still has live or closed lines "
                "(vendor didn't deliver, line was killed) count as 0% filled.")
@@ -1061,7 +1075,7 @@ with tabs[5]:
 # ==========================================================================
 # TAB 7 — CASH FLOW
 # ==========================================================================
-with tabs[6]:
+with tabs[6], guard():
     st.header("Cash Flow Commitments — 6-Month Forward View")
     st.caption("Open PO lines (Hst 20-40) on active items, Otp = P01 excluded, timed by Req dt. Past months are excluded from the forward view. "
                "Ignores the Order Year/Month sidebar filters (all open orders are included); Supplier / Category filters apply.")
@@ -1138,7 +1152,7 @@ with tabs[6]:
 # ==========================================================================
 # TAB 8 — PRICE INDEX (PPV)
 # ==========================================================================
-with tabs[7]:
+with tabs[7], guard():
     st.header("Procurement & Price Index (PPV Trend)")
     st.caption("Saleable item groups only. Price = PO 'Purch price' converted to USD, compared with the same item's previous order price from the same supplier (same UOM). "
                "Single-order jumps above ±100% are dropped as probable UOM / data errors.")
