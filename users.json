@@ -2,5 +2,13 @@
   "dbrown": {
     "name": "Dwayne Brown",
     "hash": "pbkdf2_sha256$200000$b35735ec99423088a2dd1f878b9d404c$529148a231fec854ad00ee91b785f0362bb48e724cd6e20b587652f0e3f6a7c6"
+  },
+  "skhatri": {
+    "name": "Sameer Khatri",
+    "hash": "pbkdf2_sha256$200000$8e6737ff42d1517153e832f2b8fb55db$099471e68ef774003b34f3dab37c48f373db4e16ddad55ae6fcf81f2b1cea9f7"
+  },
+  "jadam": {
+    "name": "Joanna Adams",
+    "hash": "pbkdf2_sha256$200000$e1a70a290c911d078b2915a173af7ed6$f73eb47ed1bb38c7796b27b29440936dec90c743b569c18601374cdfd055ff2f"
   }
 }
