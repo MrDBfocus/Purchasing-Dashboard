@@ -1,0 +1,2 @@
+cd /workspaces/Purchasing-Dashboard
+python manage_users.py add dbrown --name "Dwayne Brown"
