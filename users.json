@@ -10,5 +10,9 @@
   "jadam": {
     "name": "Joanna Adams",
     "hash": "pbkdf2_sha256$200000$e1a70a290c911d078b2915a173af7ed6$f73eb47ed1bb38c7796b27b29440936dec90c743b569c18601374cdfd055ff2f"
+  },
+  "xmartinez": {
+    "name": "Xavier Martinez",
+    "hash": "pbkdf2_sha256$200000$537240087488c61162408fe53ffe587c$da69879810856f0617e64b7f2ce5629d5b87ef25ba842c10eceff5fc259d9da2"
   }
 }
